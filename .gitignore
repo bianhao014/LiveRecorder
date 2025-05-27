@@ -1,0 +1,24 @@
+# 忽略编译生成的文件
+*.pyc
+__pycache__/
+
+# 忽略虚拟环境
+venv/
+env/
+
+# 忽略日志文件
+*.log
+
+# 忽略临时文件
+*.tmp
+
+*.flv
+*.mp4
+
+
+# 忽略依赖文件（如果使用 Poetry）
+poetry.lock
+
+.idea/
+.venv/
+.github/

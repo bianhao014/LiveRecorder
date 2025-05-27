@@ -4,6 +4,15 @@ import os
 import re
 import time
 import uuid
+import warnings
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
+
+# 禁用所有urllib3的警告
+urllib3.disable_warnings()
+# 特别禁用 InsecureRequestWarning 警告
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
+
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Dict, Tuple, Union
@@ -12,6 +21,8 @@ import requests
 import hashlib
 import time
 import urllib.parse
+# 配置requests禁用SSL验证警告
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 import anyio
 import ffmpeg
@@ -30,8 +41,41 @@ from streamlink_cli.streamrunner import StreamRunner
 recording: Dict[str, Tuple[StreamIO, FileOutput]] = {}
 
 
-class LiveRecoder:
-    def __init__(self, config: dict, user: dict):
+class LiveRecorder:
+    def __init__(self, config: dict, user: dict = None):
+        """初始化直播录制器
+        
+        Args:
+            config (dict): 配置字典，包含全局配置
+            user (dict, optional): 用户特定的配置。如果提供，将立即初始化录制器配置
+        """
+        # 保存完整配置
+        self.config = config
+
+        # 初始化录制状态
+        self.running = False
+        self.tasks = []
+
+        # 初始化日志
+        logger.add(
+            sink='logs/log_{time:YYYY-MM-DD}.log',
+            rotation='00:00',
+            retention='3 days',
+            level='INFO',
+            encoding='utf-8',
+            format='[{time:YYYY-DD-MM HH:mm:ss}][{level}][{name}][{function}:{line}]{message}'
+        )
+
+        # 如果提供了用户配置，立即初始化录制器
+        if user is not None:
+            self._init_recorder(user)
+
+    def _init_recorder(self, user: dict):
+        """初始化单个录制实例的配置
+        
+        Args:
+            user (dict): 用户配置字典
+        """
         self.id = user['id']
         platform = user['platform']
         name = user.get('name', self.id)
@@ -42,26 +86,94 @@ class LiveRecoder:
         self.headers = user.get('headers', {'User-Agent': 'Chrome'})
         self.cookies = user.get('cookies')
         self.format = user.get('format')
-        self.proxy = user.get('proxy', config.get('proxy'))
-        self.output = user.get('output', config.get('output', 'output'))
+        self.proxy = user.get('proxy', self.config.get('proxy'))
+        self.output = user.get('output', self.config.get('output', 'output'))
         if not self.crypto_js_url:
             self.crypto_js_url = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js'
         self.get_cookies()
         self.client = self.get_client()
 
-    async def start(self):
+    def start(self):
+        """启动录制
+        
+        初始化并启动所有配置的直播录制任务
+        """
+        if self.running:
+            logger.warning("录制已经在运行中")
+            return
+
+        self.running = True
         self.ssl = True
         self.mState = 0
-        while True:
+
+        # 创建事件循环
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+        # 启动所有录制任务
+        try:
+            for user in self.config['user']:
+                # 创建对应平台的录制实例
+                platform_class = globals()[user['platform']]
+                recorder = platform_class(self.config, user)
+
+                # 启动录制任务
+                task = self.loop.create_task(self._record_task(recorder))
+                self.tasks.append(task)
+
+            # 运行事件循环
+            self.loop.run_forever()
+
+        except Exception as e:
+            logger.exception("启动录制失败")
+            self.stop()
+            raise e
+
+    def stop(self):
+        """停止录制
+        
+        停止所有录制任务并清理资源
+        """
+        if not self.running:
+            return
+
+        self.running = False
+
+        # 停止所有录制任务
+        for task in self.tasks:
+            task.cancel()
+
+        # 关闭所有直播流
+        for stream_fd, output in recording.copy().values():
+            stream_fd.close()
+            output.close()
+
+        # 清空任务列表
+        self.tasks.clear()
+
+        # 停止事件循环
+        if hasattr(self, 'loop'):
+            self.loop.stop()
+            self.loop.close()
+
+        logger.info("已停止所有录制任务")
+
+    async def _record_task(self, recorder):
+        """单个录制任务的运行逻辑
+        
+        Args:
+            recorder: 录制实例
+        """
+        while self.running:
             try:
-                logger.info(f'{self.flag}正在检测直播状态')
-                logger.info(f'预配置刷新间隔：{self.interval}s')
+                logger.info(f'{recorder.flag}正在检测直播状态')
+                logger.info(f'预配置刷新间隔：{recorder.interval}s')
                 try:
-                    await self.run()
+                    await recorder.run()
                 except Exception as run_error:
-                    logger.error(f"{self.flag}直播检测内部错误\n{repr(run_error)}")
-                state = self.mState
-                timeI = self.interval
+                    logger.error(f"{recorder.flag}直播检测内部错误\n{repr(run_error)}")
+                state = recorder.mState
+                timeI = recorder.interval
                 if state == '1':
                     timeI = 2
                 logger.info(f'->直播状态：{state}  实际刷新间隔：{timeI}s')
@@ -69,10 +181,12 @@ class LiveRecoder:
             except ConnectionError as error:
                 if '直播检测请求协议错误' not in str(error):
                     logger.error(error)
-                await self.client.aclose()
-                self.client = self.get_client()
+                await recorder.client.aclose()
+                recorder.client = recorder.get_client()
+            except asyncio.CancelledError:
+                break
             except Exception as error:
-                logger.exception(f'{self.flag}直播检测错误\n{repr(error)}')
+                logger.exception(f'{recorder.flag}直播检测错误\n{repr(error)}')
 
     async def run(self):
         pass
@@ -203,7 +317,16 @@ class LiveRecoder:
         os.remove(f'{self.output}/{filename}')
 
 
-class Bilibili(LiveRecoder):
+class Bilibili(LiveRecorder):
+    def __init__(self, config: dict, user: dict):
+        """初始化Bilibili录制器
+        
+        Args:
+            config (dict): 配置字典
+            user (dict): 用户配置
+        """
+        super().__init__(config, user)
+        
     async def run(self):
         url = f'https://live.bilibili.com/{self.id}'
         if url not in recording:
@@ -218,7 +341,16 @@ class Bilibili(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
 
 
-class Douyu(LiveRecoder):
+class Douyu(LiveRecorder):
+    def __init__(self, config: dict, user: dict):
+        """初始化斗鱼录制器
+        
+        Args:
+            config (dict): 配置字典
+            user (dict): 用户配置
+        """
+        super().__init__(config, user)
+        
     async def run(self):
         url = f'https://www.douyu.com/{self.id}'
         if url not in recording:
@@ -278,7 +410,16 @@ class Douyu(LiveRecoder):
         return f"{response['data']['rtmp_url']}/{response['data']['rtmp_live']}"
 
 
-class Huya(LiveRecoder):
+class Huya(LiveRecorder):
+    def __init__(self, config: dict, user: dict):
+        """初始化虎牙录制器
+        
+        Args:
+            config (dict): 配置字典
+            user (dict): 用户配置
+        """
+        super().__init__(config, user)
+        
     async def run(self):
         url = f'https://www.huya.com/{self.id}'
         if url not in recording:
@@ -292,7 +433,16 @@ class Huya(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
 
 
-class Douyin(LiveRecoder):
+class Douyin(LiveRecorder):
+    def __init__(self, config: dict, user: dict):
+        """初始化抖音录制器
+        
+        Args:
+            config (dict): 配置字典
+            user (dict): 用户配置
+        """
+        super().__init__(config, user)
+        
     async def run(self):
         url = f'https://live.douyin.com/{self.id}'
         if url not in recording:
@@ -328,7 +478,7 @@ class Douyin(LiveRecoder):
                     await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
 
 
-class Youtube(LiveRecoder):
+class Youtube(LiveRecorder):
     async def run(self):
         response = (await self.request(
             method='POST',
@@ -362,7 +512,7 @@ class Youtube(LiveRecoder):
                     asyncio.create_task(asyncio.to_thread(self.run_record, stream, url, title, 'ts'))
 
 
-class Twitch(LiveRecoder):
+class Twitch(LiveRecorder):
     async def run(self):
         url = f'https://www.twitch.tv/{self.id}'
         if url not in recording:
@@ -389,7 +539,7 @@ class Twitch(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Niconico(LiveRecoder):
+class Niconico(LiveRecorder):
     async def run(self):
         url = f'https://live.nicovideo.jp/watch/{self.id}'
         if url not in recording:
@@ -405,7 +555,7 @@ class Niconico(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Twitcasting(LiveRecoder):
+class Twitcasting(LiveRecorder):
     async def run(self):
         url = f'https://twitcasting.tv/{self.id}'
         if url not in recording:
@@ -427,7 +577,7 @@ class Twitcasting(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'mp4')
 
 
-class Afreeca(LiveRecoder):
+class Afreeca(LiveRecorder):
     async def run(self):
         url = f'https://play.afreecatv.com/{self.id}'
         if url not in recording:
@@ -442,28 +592,27 @@ class Afreeca(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Pandalive(LiveRecoder):
-    async def run(self):
-        url = f'https://www.pandalive.co.kr/live/play/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://api.pandalive.co.kr/v1/live/play',
-                headers={
-                    'x-device-info': '{"t":"webMobile","v":"1.0","ui":0}'
-                },
-                data={
-                    'action': 'watch',
-                    'userId': self.id
-                }
-            )).json()
-            if response['result']:
-                title = response['media']['title']
-                stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
+async def run(self):
+    url = f'https://www.pandalive.co.kr/live/play/{self.id}'
+    if url not in recording:
+        response = (await self.request(
+            method='POST',
+            url='https://api.pandalive.co.kr/v1/live/play',
+            headers={
+                'x-device-info': '{"t":"webMobile","v":"1.0","ui":0}'
+            },
+            data={
+                'action': 'watch',
+                'userId': self.id
+            }
+        )).json()
+        if response['result']:
+            title = response['media']['title']
+            stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
+            await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Bigolive(LiveRecoder):
+class Bigolive(LiveRecorder):
     async def run(self):
         url = f'https://www.bigo.tv/cn/{self.id}'
         if url not in recording:
@@ -481,7 +630,7 @@ class Bigolive(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Pixivsketch(LiveRecoder):
+class Pixivsketch(LiveRecorder):
     async def run(self):
         url = f'https://sketch.pixiv.net/{self.id}'
         if url not in recording:
@@ -502,7 +651,7 @@ class Pixivsketch(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Chaturbate(LiveRecoder):
+class Chaturbate(LiveRecorder):
     async def run(self):
         url = f'https://chaturbate.com/{self.id}'
         if url not in recording:
@@ -526,7 +675,18 @@ class Chaturbate(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
-class Kwai(LiveRecoder):
+class Kwai(LiveRecorder):
+    def __init__(self, config: dict, user: dict):
+        """初始化快手录制器
+        
+        Args:
+            config (dict): 配置字典
+            user (dict): 用户配置
+        """
+        super().__init__(config, user)
+        self.mState = 0  # 初始化直播状态
+        self.ssl = False  # 设置SSL验证状态
+        
     async def create_signature(self, query_str: str, post_dict: dict) -> str:
         # 解析 query_str 为字典
         query_obj = {}
@@ -586,12 +746,17 @@ class Kwai(LiveRecoder):
         #     headers=headers
         # )
 
+        # 配置requests会话
+        session = requests.Session()
+        session.verify = False
+        # 设置代理
         proxies = {
             'http': 'http://127.0.0.1:10808',
             'https': 'http://127.0.0.1:10808'
         }
-        resp = requests.post(url + query, data=data, headers=headers,
-                            proxies=proxies, verify=False, timeout=10)
+        session.proxies = proxies
+        # 发送请求
+        resp = session.post(url + query, data=data, headers=headers, timeout=10)
         resp.raise_for_status()
 
         response_json = resp.json()
@@ -625,6 +790,7 @@ class Kwai(LiveRecoder):
             try:
                 live_url = await self.get_live_url()
                 if live_url:
+                    self.mState = "1"  # 设置为直播中状态
                     title = self.id.replace(" ", "")  # 使用用户名作为标题
                     stream = HTTPStream(
                         self.get_streamlink(),
@@ -632,8 +798,11 @@ class Kwai(LiveRecoder):
                     )  # HTTPStream[flv]
                     url = live_url
                     await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
+                else:
+                    self.mState = "2"  # 设置为未开播状态
             except Exception as error:
                 logger.error(f'{self.flag}获取直播流失败：{error}')
+                self.mState = "2"  # 发生错误时设置为未开播状态
 
 
 async def run():
