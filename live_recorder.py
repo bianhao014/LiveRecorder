@@ -8,6 +8,10 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Dict, Tuple, Union
 from urllib.parse import parse_qs
+import requests
+import hashlib
+import time
+import urllib.parse
 
 import anyio
 import ffmpeg
@@ -32,7 +36,7 @@ class LiveRecoder:
         platform = user['platform']
         name = user.get('name', self.id)
         self.flag = f'[{platform}][{name}]'
-        
+
         self.interval = user.get('interval', 10)
         self.crypto_js_url = user.get('crypto_js_url', '')
         self.headers = user.get('headers', {'User-Agent': 'Chrome'})
@@ -53,7 +57,7 @@ class LiveRecoder:
                 logger.info(f'{self.flag}正在检测直播状态')
                 logger.info(f'预配置刷新间隔：{self.interval}s')
                 try:
-                    await self.run()   
+                    await self.run()
                 except Exception as run_error:
                     logger.error(f"{self.flag}直播检测内部错误\n{repr(run_error)}")
                 state = self.mState
@@ -85,10 +89,8 @@ class LiveRecoder:
         except anyio.EndOfStream as error:
             raise ConnectionError(f'{self.flag}直播检测代理错误\n{error}')
         except httpx.HTTPError as error:
-           logger.error(f'网络异常 重试...')
-           raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
-		
-           
+            logger.error(f'网络异常 重试...')
+            raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
 
     def get_client(self):
         client_kwargs = {
@@ -103,7 +105,7 @@ class LiveRecoder:
             if 'socks' in self.proxy:
                 client_kwargs['transport'] = AsyncProxyTransport.from_url(self.proxy)
             else:
-                client_kwargs['proxies'] = self.proxy
+                client_kwargs['proxy'] = self.proxy
         return httpx.AsyncClient(**client_kwargs)
 
     def get_cookies(self):
@@ -174,7 +176,7 @@ class LiveRecoder:
             output.open()
             recording[url] = (stream_fd, output)
             logger.info(f'{self.flag}正在录制：{filename}')
-            StreamRunner(stream_fd, output, show_progress=True).run(prebuffer)
+            StreamRunner(stream_fd, output).run(prebuffer)
             return True
         except Exception as error:
             if 'timeout' in str(error):
@@ -249,7 +251,7 @@ class Douyu(LiveRecoder):
         getUrl = self.crypto_js_url
         crypto_js = (await self.request(
             method='GET',
-            url= getUrl
+            url=getUrl
         )).text
         return jsengine.JSEngine(js_enc + crypto_js)
 
@@ -524,6 +526,116 @@ class Chaturbate(LiveRecoder):
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 
+class Kwai(LiveRecoder):
+    async def create_signature(self, query_str: str, post_dict: dict) -> str:
+        # 解析 query_str 为字典
+        query_obj = {}
+        for pair in query_str.split('&'):
+            if '=' in pair:
+                k, v = pair.split('=', 1)
+                query_obj[k] = v
+            else:
+                query_obj[pair] = ''
+
+        # 合并参数
+        map_object = {**query_obj, **{k: str(v) for k, v in post_dict.items()}}
+
+        # 按 key 排序
+        sorted_items = sorted(map_object.items(), key=lambda x: x[0])
+
+        # 拼接字符串，value 需 decodeURIComponent
+        url_string = ""
+        for k, v in sorted_items:
+            if k in ['sig', '__NS_sig3', '__NStokensig']:
+                continue
+            url_string += f"{k}={urllib.parse.unquote(v)}"
+
+        # 拼接密钥
+        url_string += "382700b563f4"
+
+        # 计算 md5
+        return hashlib.md5(url_string.encode('utf-8')).hexdigest()
+
+    async def user_search(self) -> dict:
+        url = "https://az2-api-akpro.kwai-pro.com/rest/o/user/search?"
+        query = f"mod=unknown%28unknown%29&lon=0&countryInfo=USA&abi=armeabi-v7a&country_code=us&bucket=us&netScore=1&kpn=KWAI&timestamp={int(time.time() * 1000)}&kwai_tiny_type=2&ds=100&oc=UNKNOWN&egid=&appver=10.3.30.535003&session_id=&mcc=724&pkg=com.kwai.video&__NS_sig3=&kpf=ANDROID_PHONE&did=ANDROID_8ec206c37f1c89a8&app=1&net=WIFI&ud=0&c=GOOGLE_PLAY&time_zone=UTC%20America%2FNew_York&sys=KWAI_ANDROID_5.1.1&language=en-us&lat=0&ver=10.3"
+
+        data = {
+            'user_name': self.id,
+            'page': '1',
+            'source': 'USER_INPUT',
+            'searchSubQueryID': 'd1bdf8ac-b292-43bf-ac52-6b51b622843d',
+            'adExtInfo': '{"gaid":"02481f56-ceac-4a1c-9d6f-ed7fbbfbbbed","userAgent":"Dalvik\\/2.1.0 (Linux; U; Android 5.1.1; ASUS_I005DA Build\\/LMY48Z)"}',
+            'client_key': '3c2cd3f3',
+            'os': 'android',
+        }
+
+        sig = await self.create_signature(query, data)
+        data['sig'] = sig
+
+        headers = {
+            'user-agent': 'kwai-android aegon/3.12.1-2-ge5f58c20-nodiag-nolto',
+            'content-type': 'application/x-www-form-urlencoded',
+            'x-client-info': 'model=ASUS_I005DA;os=Android;nqe-score=8;network=WIFI;signal-strength=4;'
+        }
+
+        # response = await self.request(
+        #     method='POST',
+        #     url=url + query,
+        #     data=data,
+        #     headers=headers
+        # )
+
+        proxies = {
+            'http': 'http://127.0.0.1:10808',
+            'https': 'http://127.0.0.1:10808'
+        }
+        resp = requests.post(url + query, data=data, headers=headers,
+                            proxies=proxies, verify=False, timeout=10)
+        resp.raise_for_status()
+
+        response_json = resp.json()
+        if not response_json.get('users'):
+            return None
+
+        user = response_json['users'][0]
+        live_info = user.get('liveInfo')
+        if not live_info:
+            return None
+
+        return {
+            'live_stream_id': live_info.get('liveStreamId'),
+            'exp_tag': live_info.get('exp_tag'),
+            'user_id': live_info.get('user', {}).get('user_id'),
+            'zt_play_config': json.loads(live_info.get('playInfo', {}).get('ztPlayConfig', '{}'))
+        }
+
+    async def get_live_url(self) -> str:
+        info = await self.user_search()
+        if not info:
+            return None
+        url = info['zt_play_config']['liveAdaptiveManifest'][-1]['adaptationSet']['representation'][-1]['url']
+        # live_url = re.match(r'(.*?auth_key=[^&]+)', url).group(1)
+        # live_url = "httpstream://"+live_url
+        return url
+
+    async def run(self):
+        url = f''
+        if url not in recording:
+            try:
+                live_url = await self.get_live_url()
+                if live_url:
+                    title = self.id.replace(" ", "")  # 使用用户名作为标题
+                    stream = HTTPStream(
+                        self.get_streamlink(),
+                        live_url
+                    )  # HTTPStream[flv]
+                    url = live_url
+                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
+            except Exception as error:
+                logger.error(f'{self.flag}获取直播流失败：{error}')
+
+
 async def run():
     with open('config.json', 'r', encoding='utf-8') as f:
         config = json.load(f)
@@ -551,3 +663,5 @@ if __name__ == '__main__':
         format='[{time:YYYY-MM-DD HH:mm:ss}][{level}][{name}][{function}:{line}]{message}'
     )
     asyncio.run(run())
+
+# streamlink "httpstream://http://ali-pro-origin-pull.kwai.net/livecloud/kszt_rn7FUC__WeU_snma450.flv?auth_key=1750825651-0-0-a3ddb20e72ea41217b250329e071c7ac" best

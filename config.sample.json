@@ -77,6 +77,12 @@
       "platform": "Chaturbate",
       "id": "abc123",
       "name": "abc123"
+    },
+    {
+      "platform": "Kwai",
+      "id": "Joao Kleber",
+      "name": "Kwai用户",
+      "interval": 30
     }
   ]
 }
