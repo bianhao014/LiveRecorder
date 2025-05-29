@@ -5,6 +5,9 @@ __pycache__/
 # 忽略虚拟环境
 venv/
 env/
+dist/
+build/
+output/
 
 # 忽略日志文件
 *.log

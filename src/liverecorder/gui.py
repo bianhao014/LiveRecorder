@@ -1,0 +1,777 @@
+import toga
+from toga.style import Pack
+from toga.style.pack import COLUMN, ROW, CENTER, LEFT
+import os
+import sys
+from pathlib import Path
+import asyncio
+import threading
+import re
+import logging
+from datetime import datetime
+from .live_recorder import LiveRecorder
+from .config_manager import ConfigManager
+
+# 配置日志
+logger = logging.getLogger('liverecorder.gui')
+
+class GuiLogHandler(logging.Handler):
+    """将日志重定向到GUI的处理器"""
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
+                                          datefmt='%H:%M:%S'))
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # 使用asyncio.create_task替代已弃用的add_background_task
+            asyncio.create_task(self._update_log(msg))
+        except Exception as e:
+            print(f"Error emitting log: {e}")
+            self.handleError(record)
+
+    async def _update_log(self, msg):
+        """异步更新日志"""
+        try:
+            self.app.add_log(msg)
+        except Exception as e:
+            print(f"Error updating log: {e}")
+
+def validate_proxy(proxy):
+    """验证代理格式"""
+    if not proxy:  # 允许为空
+        return True
+    proxy_pattern = r'^(http|socks[45]?)://([a-zA-Z0-9.-]+):(\d+)$'
+    return bool(re.match(proxy_pattern, proxy))
+
+def validate_interval(interval):
+    """验证间隔时间"""
+    try:
+        value = int(interval)
+        return value > 0
+    except ValueError:
+        return False
+
+class LiveRecorderApp(toga.App):
+    def __init__(self):
+        super().__init__(
+            formal_name='Kwai直播录制工具',
+            app_id='com.example.liverecorder',
+            app_name='LiveRecorder',
+            description='实时检测录制各大平台直播流',
+            on_exit=self.on_exit  # 正确设置退出处理程序
+        )
+        self.recorder = None
+        self.recorder_threads = []  # 初始化录制线程列表
+        self.recording = False
+        self.config_manager = ConfigManager()
+        self.current_user = None  # 当前选中的用户
+        self._is_exiting = False  # 标记应用是否正在退出
+
+    def on_exit(self, widget):
+        # 终止所有录制线程
+        if hasattr(self, 'recorder_threads'):
+            for thread in self.recorder_threads:
+                thread.stop_recording()
+                thread.join(timeout=5)
+        
+        # 直接返回True允许正常退出
+        return True
+
+        
+        
+
+    def add_log(self, message):
+        """添加日志到日志输出区域"""
+        if hasattr(self, 'log_output'):
+            # 直接更新日志，因为emit方法已经确保在UI线程中调用
+            current_text = self.log_output.value
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            new_log = f"[{timestamp}] {message}\n"
+            self.log_output.value = current_text + new_log
+            # 滚动到底部
+            self.log_output.scroll_to_bottom()
+
+    def startup(self):
+        # 确保日志系统正确初始化
+        logger.handlers = []  # 清除所有现有处理器
+        logger.propagate = False  # 防止日志传播到根logger
+
+        # 配置GUI日志处理器
+        gui_handler = GuiLogHandler(self)
+        gui_handler.setLevel(logging.INFO)
+        logger.addHandler(gui_handler)
+        logger.setLevel(logging.INFO)
+
+        # 添加控制台日志处理器用于调试
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(console_handler)
+        
+        # 配置loguru日志拦截器，将loguru日志重定向到标准logging
+        from loguru import logger as loguru_logger
+        import sys
+        
+        class InterceptHandler(logging.Handler):
+            def emit(self, record):
+                # 获取对应的loguru级别
+                try:
+                    level = loguru_logger.level(record.levelname).name
+                except ValueError:
+                    level = record.levelno
+                
+                # 找到调用者的帧
+                frame, depth = logging.currentframe(), 2
+                while frame.f_code.co_filename == logging.__file__:
+                    frame = frame.f_back
+                    depth += 1
+                
+                # 将日志记录转发给loguru
+                loguru_logger.opt(depth=depth, exception=record.exc_info).log(
+                    level, record.getMessage()
+                )
+        
+        # 拦截所有来自live_recorder模块的日志
+        logging.getLogger("liverecorder").handlers = [InterceptHandler()]
+        
+        # 配置loguru将日志发送到GUI
+        loguru_logger.configure(handlers=[
+            {"sink": lambda msg: self.add_log(msg), "format": "{message}"}
+        ])
+        
+        # 测试日志
+        logger.info("GUI日志系统初始化完成")
+        loguru_logger.info("Loguru日志系统已连接到GUI")
+
+
+        # 创建主窗口
+        self.main_window = toga.MainWindow(title=self.formal_name)
+
+        # 创建设置页内容
+        settings_content = toga.Box(style=Pack(direction=COLUMN, margin=10))
+        settings_scroll = toga.ScrollContainer(style=Pack(flex=1))
+        settings_scroll.content = settings_content
+
+        # 创建控制页内容
+        control_content = toga.Box(style=Pack(direction=COLUMN, margin=10))
+
+        # 录制控制
+        record_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+        record_box.add(toga.Label('录制控制', style=Pack(margin=(0, 0, 5, 0))))
+
+        # 录制按钮
+        self.record_button = toga.Button(
+            '开始录制',
+            on_press=self.toggle_recording,
+            style=Pack(flex=1, margin=2)
+        )
+        record_box.add(self.record_button)
+
+
+        # 日志输出
+        log_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+        log_box.add(toga.Label('日志打印', style=Pack(margin=(0, 0, 5, 0))))
+
+        self.log_output = toga.MultilineTextInput(
+            readonly=True,
+            style=Pack(flex=1, height=200)
+        )
+        log_box.add(self.log_output)
+
+        control_content.add(record_box)
+        control_content.add(log_box)
+
+        # 包装控制页内容
+        control_scroll = toga.ScrollContainer(style=Pack(flex=1))
+        control_scroll.content = control_content
+
+        # 创建选项容器(替代标签页)
+        option_container = toga.OptionContainer(
+            style=Pack(flex=1),
+            content=[
+                ('录制设置', settings_scroll),
+                ('录制控制', control_scroll)
+            ]
+        )
+
+        # 全局配置
+        global_config_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+        global_config_box.add(toga.Label('全局设置', style=Pack(margin=(0, 0, 5, 0))))
+
+        # Proxy输入
+        proxy_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.proxy_input = toga.TextInput(
+            style=Pack(flex=1),
+            on_confirm=self.on_proxy_changed,
+            on_lose_focus=self.on_proxy_changed
+        )
+        proxy_box.add(toga.Label('代理设置:', style=Pack(width=100)))
+        proxy_box.add(self.proxy_input)
+        global_config_box.add(proxy_box)
+
+        # Output目录选择
+        output_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.output_input = toga.TextInput(
+            style=Pack(flex=1),
+            on_change=self.on_output_changed
+        )
+        self.output_button = toga.Button(
+            '浏览',
+            on_press=self.select_output_directory,
+            style=Pack(width=80)
+        )
+        output_box.add(toga.Label('输出目录:', style=Pack(width=100)))
+        output_box.add(self.output_input)
+        output_box.add(self.output_button)
+        global_config_box.add(output_box)
+
+        settings_content.add(global_config_box)
+
+        # 用户配置
+        user_config_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+        user_config_box.add(toga.Label('录制用户设置', style=Pack(margin=(10, 0, 5, 0))))
+
+        # Platform选择
+        platform_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.platform_select = toga.Selection(
+            items=['Kwai'],
+            style=Pack(flex=1)
+        )
+        platform_box.add(toga.Label('平台:', style=Pack(width=100)))
+        platform_box.add(self.platform_select)
+        user_config_box.add(platform_box)
+
+        # Name输入
+        name_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.name_input = toga.TextInput(style=Pack(flex=1))
+        name_box.add(toga.Label('用户昵称:', style=Pack(width=100)))
+        name_box.add(self.name_input)
+        user_config_box.add(name_box)
+
+        # Interval输入
+        interval_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.interval_input = toga.TextInput(style=Pack(flex=1))
+        interval_box.add(toga.Label('轮询时间间隔:', style=Pack(width=100)))
+        interval_box.add(self.interval_input)
+        user_config_box.add(interval_box)
+
+        # Duration输入
+        duration_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.duration_input = toga.TextInput(style=Pack(flex=1))
+        duration_box.add(toga.Label('录制时长:', style=Pack(width=100)))
+        duration_box.add(self.duration_input)
+        user_config_box.add(duration_box)
+
+        # Duration单位选择
+        unit_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.unit_select = toga.Selection(
+            items=['seconds', 'minutes', 'hours'],
+            style=Pack(flex=1)
+        )
+        unit_box.add(toga.Label('时长单位:', style=Pack(width=100)))
+        unit_box.add(self.unit_select)
+        user_config_box.add(unit_box)
+
+        # 用户操作按钮
+        user_buttons_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.add_user_button = toga.Button(
+            '新增用户',
+            on_press=self.add_user,
+            style=Pack(flex=1, margin=2)
+        )
+        self.update_user_button = toga.Button(
+            '修改用户',
+            on_press=self.update_user,
+            style=Pack(flex=1, margin=2)
+        )
+        self.delete_user_button = toga.Button(
+            '删除用户',
+            on_press=self.delete_user,
+            style=Pack(flex=1, margin=2)
+        )
+        user_buttons_box.add(self.add_user_button)
+        user_buttons_box.add(self.update_user_button)
+        user_buttons_box.add(self.delete_user_button)
+        user_config_box.add(user_buttons_box)
+
+        settings_content.add(user_config_box)
+
+        # 用户列表
+        users_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+        users_box.add(toga.Label('用户列表', style=Pack(margin=(10, 0, 5, 0))))
+
+        # 创建并初始化表格
+        self.users_table = toga.Table(
+            headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位'],
+            accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit'],
+            data=[],
+            style=Pack(flex=1, width=800),
+            on_select=self.on_user_selected,
+            multiple_select=False,
+            missing_value=''
+        )
+        users_box.add(self.users_table)
+
+        # 立即刷新表格数据
+        self.refresh_users_table()
+
+        settings_content.add(users_box)
+
+        # 设置主窗口的内容
+        self.main_window.content = option_container
+        self.main_window.size = (800, 600)
+
+        # 加载配置并更新显示
+        self.update_config_display()
+
+        # 显示主窗口
+        self.main_window.show()
+
+    def on_proxy_changed(self, widget):
+        """代理设置变更处理"""
+        try:
+            proxy = widget.value.strip()
+            if proxy and not validate_proxy(proxy):
+                self.main_window.info_dialog(
+                    'Error',
+                    'Invalid proxy format. Use http://host:port or socks5://host:port'
+                )
+                return
+
+            self.config_manager.set_global_config('proxy', proxy)
+            self.update_recorder_config()
+        except Exception as e:
+            print(f"Error updating proxy: {e}")
+
+    def on_output_changed(self, widget):
+        """输出目录变更处理"""
+        try:
+            output = widget.value.strip()
+            self.config_manager.set_global_config('output', output)
+            self.update_recorder_config()
+        except Exception as e:
+            print(f"Error updating output directory: {e}")
+
+    def update_recorder_config(self):
+        """更新录制器配置"""
+        try:
+            if self.recording and self.recorder:
+                config = self.config_manager.export_config()
+                self.recorder.update_config(config)
+        except Exception as e:
+            print(f"Error updating recorder config: {e}")
+
+    async def show_info_message(self, title, message):
+        """安全地显示信息对话框"""
+        try:
+            # 使用异步对话框API
+            dialog = toga.InfoDialog(title=title, message=message)
+            await self.main_window.dialog(dialog)
+        except Exception as e:
+            print(f"Error showing message: {e}")
+            logger.error(f'Failed to show message: {str(e)}')
+
+    def update_config_display(self):
+        """更新界面显示"""
+        try:
+            # 更新全局配置
+            self.proxy_input.value = self.config_manager.get_global_config('proxy', '')
+            self.output_input.value = self.config_manager.get_global_config('output', 'output')
+
+            # 更新用户列表
+            self.refresh_users_table()
+        except Exception as e:
+            print(f"Error updating display: {e}")
+
+    def refresh_users_table(self):
+        """刷新用户列表"""
+        try:
+            users = self.config_manager.get_all_users()
+            print(f"Refreshing tree with {len(users)} users")  # 调试信息
+
+            # 为Table组件准备数据
+            table_data = []
+            for user in users:
+                # 创建表格行数据（使用字典格式配合accessors）
+                row_data = {
+                    'id': str(user.get('id', '')),
+                    'platform': str(user.get('platform', 'Kwai')),
+                    'name': str(user.get('name', '')),
+                    'interval': str(user.get('interval', 30)),
+                    'duration': str(user.get('duration', '')),
+                    'duration_unit': str(user.get('duration_unit', 'seconds')),
+                }
+                table_data.append(row_data)
+                print(f"Added row: {row_data}")  # 调试信息
+
+            print(f"Setting table data with {len(table_data)} rows")  # 调试信息
+            self.users_table.data = table_data
+
+            # 如果当前没有选中的用户且有数据，自动选择第一个用户
+            if not self.current_user and table_data and len(users) > 0:
+                print("No current user, updating form with first user")  # 调试信息
+                first_user = users[0]
+                self.platform_select.value = first_user.get('platform', 'Kwai')
+                self.name_input.value = first_user.get('name', '')
+                self.interval_input.value = str(first_user.get('interval', 30))
+                self.current_user = first_user
+                print(f"Form updated with first user: {first_user}")  # 调试信息
+
+        except Exception as e:
+            print(f"Error refreshing users tree: {e}")
+            import traceback
+            print(traceback.format_exc())  # 打印完整的错误堆栈
+
+    async def select_output_directory(self, widget):
+        """选择输出目录"""
+        try:
+            # 使用新的对话框API
+            dialog = toga.SelectFolderDialog(title="Select Output Directory")
+            output_dir = await self.main_window.dialog(dialog)
+
+            if output_dir is not None:  # 检查是否选择了目录
+                # 将 WindowsPath 转换为字符串
+                output_dir_str = str(output_dir)
+                self.output_input.value = output_dir_str
+                self.config_manager.set_global_config('output', output_dir_str)
+                self.update_recorder_config()
+        except Exception as e:
+            print(f"Error selecting directory: {e}")
+            logger.error(f'Failed to select directory: {str(e)}')
+
+    def validate_user_input(self):
+        """验证用户输入"""
+        try:
+            name = self.name_input.value.strip()
+            if not name:
+                self.main_window.info_dialog(
+                    'Error',
+                    'Name is required'
+                )
+                return False
+
+            interval = self.interval_input.value.strip()
+            if not validate_interval(interval):
+                self.main_window.info_dialog(
+                    'Error',
+                    'Interval must be a positive number'
+                )
+                return False
+
+            duration = self.duration_input.value.strip()
+            if duration and not validate_interval(duration):
+                self.main_window.info_dialog(
+                    'Error',
+                    'Duration must be a positive number'
+                )
+                return False
+
+            return True
+        except Exception as e:
+            print(f"Error validating user input: {e}")
+            return False
+
+    def clear_user_form(self):
+        """清空用户表单"""
+        try:
+            self.platform_select.value = 'Kwai'
+            self.name_input.value = ''
+            self.interval_input.value = '30'
+            self.duration_input.value = ''
+            self.unit_select.value = 'seconds'
+            if self.current_user:
+                logger.debug(f"清空表单，原用户ID: {self.current_user.get('id', '')}")
+            self.current_user = None
+            print("Form cleared")  # 添加调试信息
+        except Exception as e:
+            print(f"Error clearing form: {e}")
+
+    def add_user(self, widget):
+        """添加新用户到配置"""
+        try:
+            logger.info("开始添加新用户流程")
+
+            # 1. 验证输入
+            if not self.validate_user_input():
+                logger.warning("用户输入验证失败")
+                return
+
+            # 2. 准备新用户数据
+            duration = self.duration_input.value.strip()
+            duration = int(duration) if duration else None
+            duration_unit = self.unit_select.value if duration else None
+
+            new_user = {
+                'platform': self.platform_select.value,
+                'name': self.name_input.value.strip(),
+                'interval': int(self.interval_input.value.strip()),
+                'duration': duration,
+                'duration_unit': duration_unit,
+                'created_at': datetime.now().isoformat()
+            }
+            logger.debug(f"准备添加的用户数据: {new_user}")
+
+            # 3. 检查用户是否已存在
+            existing_users = self.config_manager.get_all_users()
+            for user in existing_users:
+                if (user['name'].lower() == new_user['name'].lower() and
+                        user['platform'].lower() == new_user['platform'].lower()):
+                    logger.warning(f"用户已存在: {new_user['name']}@{new_user['platform']}")
+                    self.main_window.info_dialog(
+                        '错误',
+                        f'用户 {new_user["name"]} 已在平台 {new_user["platform"]} 存在'
+                    )
+                    return
+
+            # 4. 保存到配置文件
+            self.config_manager.add_user(new_user)
+            logger.info(f"成功添加用户: {new_user['name']}")
+
+            # 5. 刷新界面
+            self.refresh_users_table()
+            self.clear_user_form()
+
+            # 6. 提供成功反馈
+            self.main_window.info_dialog(
+                '成功',
+                f'用户 {new_user["name"]} 添加成功'
+            )
+
+        except ValueError as ve:
+            logger.error(f"数值转换错误: {str(ve)}")
+            self.main_window.info_dialog(
+                '输入错误',
+                '请输入有效的数字值'
+            )
+        except Exception as e:
+            logger.error(f"添加用户失败: {str(e)}", exc_info=True)
+            self.main_window.info_dialog(
+                '错误',
+                f'添加用户失败: {str(e)}'
+            )
+
+    def update_user(self, widget):
+        """更新当前选中的用户信息"""
+        try:
+            logger.info("开始更新用户流程")
+
+            # 1. 检查是否有选中的用户
+            if not self.current_user:
+                logger.warning("没有选中的用户")
+                self.main_window.info_dialog(
+                    '错误',
+                    '请先选择一个要修改的用户'
+                )
+                return
+
+            # 2. 验证输入
+            if not self.validate_user_input():
+                logger.warning("用户输入验证失败")
+                return
+
+            # 3. 准备更新后的用户数据
+            duration = self.duration_input.value.strip()
+            duration = int(duration) if duration else None
+            duration_unit = self.unit_select.value if duration else None
+
+            updated_user = {
+                'id': self.current_user.get('id'),  # 保留原有ID
+                'platform': self.platform_select.value,
+                'name': self.name_input.value.strip(),
+                'interval': int(self.interval_input.value.strip()),
+                'duration': duration,
+                'duration_unit': duration_unit,
+                # 'updated_at': datetime.now().isoformat()
+            }
+            logger.debug(f"准备更新的用户数据: {updated_user}")
+
+            # 4. 检查用户是否已存在(名称或平台变更时)
+            if (updated_user['name'].lower() != self.current_user['name'].lower() or
+                    updated_user['platform'].lower() != self.current_user['platform'].lower()):
+                existing_users = self.config_manager.get_all_users()
+                for user in existing_users:
+                    if (user['name'].lower() == updated_user['name'].lower() and
+                            user['platform'].lower() == updated_user['platform'].lower()):
+                        logger.warning(f"用户已存在: {updated_user['name']}@{updated_user['platform']}")
+                        self.main_window.info_dialog(
+                            '错误',
+                            f'用户 {updated_user["name"]} 已在平台 {updated_user["platform"]} 存在'
+                        )
+                        return
+
+            # 5. 更新配置文件
+            old_name = self.current_user["name"]
+            self.config_manager.update_user(updated_user)
+            logger.info(f"成功更新用户: {old_name} -> {updated_user['name']}")
+
+            # 6. 刷新界面
+            self.refresh_users_table()
+            self.current_user = updated_user
+
+            # 7. 提供成功反馈
+            self.main_window.info_dialog(
+                '成功',
+                f'用户 {old_name} 更新成功'
+            )
+
+        except ValueError as ve:
+            logger.error(f"数值转换错误: {str(ve)}")
+            self.main_window.info_dialog(
+                '输入错误',
+                '请输入有效的数字值'
+            )
+        except Exception as e:
+            logger.error(f"更新用户失败: {str(e)}", exc_info=True)
+            self.main_window.info_dialog(
+                '错误',
+                f'更新用户失败: {str(e)}'
+            )
+
+    def delete_user(self, widget):
+        """删除当前选中的用户"""
+        try:
+            logger.info("开始删除用户流程")
+
+            # 1. 检查是否有选中的用户
+            if not self.current_user:
+                logger.warning("没有选中的用户")
+                self.main_window.info_dialog(
+                    '错误',
+                    '请先选择一个要删除的用户'
+                )
+                return
+
+            # 2. 删除用户
+            user_id = self.current_user.get('id', '')
+            user_name = self.current_user['name']
+            self.config_manager.delete_user(user_id)
+            logger.info(f"成功删除用户: {user_name} (ID: {user_id})")
+
+            # 3. 刷新界面
+            self.refresh_users_table()
+            self.clear_user_form()
+
+            # 4. 提供成功反馈
+            self.main_window.info_dialog(
+                '成功',
+                f'用户 {user_name} (ID: {user_id}) 删除成功'
+            )
+
+        except Exception as e:
+            logger.error(f"删除用户失败: {str(e)}", exc_info=True)
+            self.main_window.info_dialog(
+                '错误',
+                f'删除用户失败: {str(e)}'
+            )
+
+    def on_user_selected(self, table):
+
+        row = table.selection
+        self.current_user = None
+        if row:
+            user_id = row.id
+            self.current_user = self.config_manager.get_user_by_id(user_id)
+            if self.current_user:
+                self.platform_select.value = self.current_user['platform']
+                self.name_input.value = self.current_user['name']
+                self.interval_input.value = str(self.current_user['interval'])
+        # 处理空选择
+        if not row:
+            self.clear_user_form()
+            self.update_user_button.enabled = False
+            self.delete_user_button.enabled = False
+            return
+            
+        # 获取选中行的用户ID
+        user_id = row.id
+        
+        # 加载完整用户数据
+        user_data = self.config_manager.get_user_by_id(user_id)
+        
+        # 更新表单字段
+        self.name_input.value = user_data['name']
+        self.platform_select.value = user_data['platform']
+        self.interval_input.value = str(user_data['interval'])
+        self.duration_input.value = str(user_data['duration']) if user_data['duration'] else ''
+        self.unit_select.value = user_data['duration_unit'] if user_data['duration_unit'] else 'seconds'
+        
+        # 启用操作按钮
+        self.update_user_button.enabled = True
+        self.delete_user_button.enabled = True
+
+    async def toggle_recording(self, widget):
+        """切换录制状态"""
+        try:
+            if not self.recording:
+                # 开始录制
+                if not self.validate_recording_conditions():
+                    return
+
+                self.recording = True
+                self.record_button.text = "停止录制"
+                self.record_button.style.color = "red"
+                self.record_button.on_press = False
+
+                # 初始化录制器
+                config = self.config_manager.export_config()
+                self.recorder = LiveRecorder(config)
+
+                # 在后台线程中启动录制
+                threading.Thread(
+                    target=self.recorder.start,
+                    daemon=True
+                ).start()
+
+                logger.info("录制已启动")
+            else:
+                # 停止录制
+                self.recording = False
+                self.record_button.text = "开始录制"
+                del self.record_button.style.color
+
+                if self.recorder:
+                    self.recorder.stop()
+                    logger.info("录制已停止")
+        except Exception as e:
+            logger.error(f"切换录制状态失败: {str(e)}", exc_info=True)
+            self.main_window.info_dialog(
+                '错误',
+                f'切换录制状态失败: {str(e)}'
+            )
+            # 确保状态重置
+            self.recording = False
+            self.record_button.text = "开始录制"
+            self.record_button.style.color = None
+
+    def validate_recording_conditions(self):
+        """验证录制条件"""
+        try:
+            # 检查输出目录
+            output_dir = self.config_manager.get_global_config('output', '')
+            if not output_dir or not os.path.isdir(output_dir):
+                self.main_window.info_dialog(
+                    '错误',
+                    '请先设置有效的输出目录'
+                )
+                return False
+
+            # 检查至少有一个用户
+            users = self.config_manager.get_all_users()
+            if not users:
+                self.main_window.info_dialog(
+                    '错误',
+                    '请先添加至少一个录制用户'
+                )
+                return False
+
+            return True
+        except Exception as e:
+            logger.error(f"验证录制条件失败: {str(e)}", exc_info=True)
+            return False
+
+# 修改main函数启动方式
+def main():
+    app = LiveRecorderApp()
+    app.main_loop()

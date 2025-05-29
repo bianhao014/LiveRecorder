@@ -1,0 +1,16 @@
+LICENSE
+README.md
+pyproject.toml
+src/__init__.py
+src/liverecorder/__init__.py
+src/liverecorder/__main__.py
+src/liverecorder/config_manager.py
+src/liverecorder/gui.py
+src/liverecorder/live_recorder.py
+src/liverecorder/path_utils.py
+src/liverecorder/recorder_core.py
+src/liverecorder.egg-info/PKG-INFO
+src/liverecorder.egg-info/SOURCES.txt
+src/liverecorder.egg-info/dependency_links.txt
+src/liverecorder.egg-info/requires.txt
+src/liverecorder.egg-info/top_level.txt
