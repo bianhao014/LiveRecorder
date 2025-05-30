@@ -44,7 +44,7 @@ recording: Dict[str, Tuple[StreamIO, FileOutput]] = {}
 class LiveRecorder:
     def __init__(self, config: dict, user: dict = None, proxies=None):
         """初始化直播录制器
-        
+
         Args:
             config (dict): 配置字典，包含全局配置
             user (dict, optional): 用户特定的配置。如果提供，将立即初始化录制器配置
@@ -75,31 +75,31 @@ class LiveRecorder:
         # 如果提供了用户配置，立即初始化录制器
         if user is not None:
             self._init_recorder(user)
-            
+
     def update_config(self, config: dict):
         """更新配置
-        
+
         Args:
             config (dict): 新的配置字典
         """
         logger.info("更新录制器配置")
         self.config = config
-        
+
         # 更新全局配置
         if 'proxy' in config:
             self.proxy = config.get('proxy')
             logger.info(f"更新代理设置: {self.proxy}")
-            
+
         if 'output' in config:
             self.output = config.get('output')
             logger.info(f"更新输出目录: {self.output}")
-            
+
         # 如果有用户配置更新，需要重新初始化对应的录制器
         # 这里只是更新配置，不会重启录制任务
 
     def add_user(self, user: dict):
         """动态添加新用户监控
-        
+
         Args:
             user (dict): 新用户配置字典
         """
@@ -121,9 +121,40 @@ class LiveRecorder:
             logger.exception("添加用户监控失败")
             raise e
 
+    def stop_user(self, user_id: int):
+        """停止指定用户的录制
+
+        Args:
+            user_id (int): 用户ID
+        """
+        if not self.running:
+            logger.warning("录制器未运行")
+            return
+
+        try:
+            # 查找并取消对应用户的任务
+            tasks_to_remove = []
+            for task in self.tasks:
+                # 检查任务是否对应指定用户
+                if hasattr(task, '_recorder') and hasattr(task._recorder, 'id'):
+                    if task._recorder.id == user_id:
+                        logger.info(f"取消用户 {user_id} 的录制任务")
+                        task.cancel()
+                        tasks_to_remove.append(task)
+
+            # 从任务列表中移除已取消的任务
+            for task in tasks_to_remove:
+                self.tasks.remove(task)
+
+            logger.info(f"成功停止用户 {user_id} 的录制")
+
+        except Exception as e:
+            logger.exception(f"停止用户 {user_id} 录制失败")
+            raise e
+
     def _init_recorder(self, user: dict):
         """初始化单个录制实例的配置
-        
+
         Args:
             user (dict): 用户配置字典
         """
@@ -146,98 +177,160 @@ class LiveRecorder:
 
     def start(self):
         """启动录制
-        
+
         初始化并启动所有配置的直播录制任务
         """
         if self.running:
             logger.warning("录制已经在运行中")
             return
 
+        logger.debug("设置录制状态为运行中")
         self.running = True
         self.ssl = True
         self.mState = 0
 
-        # 创建事件循环
+        # 创建事件循环但不在此方法中运行
+        logger.debug("创建新的事件循环")
         self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        logger.debug(f"事件循环创建成功: {self.loop!r}")
 
-        # 启动所有录制任务
-        try:
-            for user in self.config['user']:
-                # 创建对应平台的录制实例
-                platform_class = globals()[user['platform']]
-                recorder = platform_class(self.config, user)
+        # 返回一个函数，该函数将在单独的线程中运行
+        def run_loop():
+            try:
+                logger.debug(f"进入run_loop函数，当前线程ID: {threading.get_ident()}")
+                logger.debug("run_loop函数开始执行")
+                logger.debug(f"设置事件循环: {self.loop!r}")
+                asyncio.set_event_loop(self.loop)
+                logger.debug("事件循环已设置")
 
-                # 启动录制任务
-                task = self.loop.create_task(self._record_task(recorder))
-                self.tasks.append(task)
+                try:
+                    logger.debug(f"用户配置: {self.config['user']}")
+                    for user in self.config['user']:
+                        # 创建对应平台的录制实例
+                        logger.debug(f"为用户 {user['name']} 创建 {user['platform']} 平台的录制实例")
+                        try:
+                            platform_class = globals()[user['platform']]
+                            logger.debug(f"成功获取平台类: {platform_class.__name__}")
+                            recorder = platform_class(self.config, user)
+                            logger.debug(f"成功创建录制实例: {recorder}")
 
-            # 运行事件循环
-            self.loop.run_forever()
+                            # 启动录制任务
+                            logger.debug(f"为用户 {user['name']} 创建录制任务")
+                            task = self.loop.create_task(self._record_task(recorder))
+                            self.tasks.append(task)
+                            logger.debug(f"成功创建录制任务: {task}")
+                        except KeyError as e:
+                            logger.error(f"找不到平台类 {user['platform']}: {e}")
+                        except Exception as e:
+                            logger.error(f"创建录制实例失败: {e}", exc_info=True)
 
-        except Exception as e:
-            logger.exception("启动录制失败")
-            self.stop()
-            raise e
+                    # 运行事件循环
+                    logger.debug("开始运行事件循环")
+                    self.loop.run_forever()
+                    logger.debug("事件循环已结束")
+                except Exception as e:
+                    logger.exception(f"启动录制失败: {e}")
+                    self.stop()
+                    raise e
+            except Exception as e:
+                logger.error(f"run_loop函数执行出错: {str(e)}", exc_info=True)
+            finally:
+                logger.debug("run_loop函数执行完毕")
+
+        logger.debug("返回run_loop函数")
+        return run_loop  # 返回函数而不是直接执行
 
     def stop(self):
         """停止录制
-        
-        停止所有录制任务并清理资源
+
+        取消所有录制任务并关闭事件循环
         """
         if not self.running:
+            logger.warning("录制未运行")
             return
 
+        logger.debug("开始停止录制")
         self.running = False
 
-        # 停止所有录制任务
-        for task in self.tasks:
-            task.cancel()
+        # 取消所有任务
+        if self.tasks:
+            logger.debug(f"取消 {len(self.tasks)} 个录制任务")
+            for task in self.tasks:
+                if not task.done():
+                    logger.debug(f"取消任务: {task}")
+                    task.cancel()
+            self.tasks = []
 
         # 关闭所有直播流
         for stream_fd, output in recording.copy().values():
+            logger.debug(f"关闭直播流: {stream_fd}")
             stream_fd.close()
             output.close()
 
-        # 清空任务列表
-        self.tasks.clear()
-
         # 停止事件循环
-        if hasattr(self, 'loop'):
-            self.loop.stop()
-            self.loop.close()
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            logger.debug("停止事件循环")
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            if hasattr(self, 'loop'):
+                self.loop.close()
+            logger.debug("事件循环已停止")
 
-        logger.info("已停止所有录制任务")
+        logger.debug("录制已完全停止")
 
     async def _record_task(self, recorder):
-        """单个录制任务的运行逻辑
-        
+        """录制任务
+
         Args:
             recorder: 录制实例
         """
-        while self.running:
+        logger.debug(f"开始录制任务: {recorder.flag}")
+
+        # 为任务添加录制器引用，以便能够通过用户ID识别任务
+        current_task = asyncio.current_task()
+        current_task._recorder = recorder
+
+        # 创建任务特定的运行标志，允许单独停止此任务
+        task_running = True
+
+        while self.running and task_running:
             try:
-                logger.info(f'{recorder.flag}正在检测直播状态')
-                logger.info(f'预配置刷新间隔：{recorder.interval}s')
+                logger.debug(f"执行录制: {recorder.flag}")
+                logger.debug(f"录制器类型: {recorder.__class__.__name__}")
+
+                # 设置超时保护
                 try:
-                    await recorder.run()
+                    # 使用超时运行录制方法，防止无限阻塞
+                    logger.debug(f"开始执行录制器的run方法: {recorder.flag}")
+                    await asyncio.wait_for(recorder.run(), timeout=60)  # 设置60秒超时
+                    logger.debug(f"录制器run方法执行完成: {recorder.flag}")
+                except asyncio.TimeoutError:
+                    logger.error(f"录制器run方法执行超时(60秒): {recorder.flag}，可能是网络问题或直播源获取失败")
+                    # 继续执行，等待下一次检查
+                except asyncio.CancelledError:
+                    logger.info(f"录制任务被取消: {recorder.flag}")
+                    task_running = False
+                    break
                 except Exception as run_error:
-                    logger.error(f"{recorder.flag}直播检测内部错误\n{repr(run_error)}")
-                state = recorder.mState
-                timeI = recorder.interval
-                if state == '1':
-                    timeI = 2
-                logger.info(f'->直播状态：{state}  实际刷新间隔：{timeI}s')
-                await asyncio.sleep(timeI)
-            except ConnectionError as error:
-                if '直播检测请求协议错误' not in str(error):
-                    logger.error(error)
-                await recorder.client.aclose()
-                recorder.client = recorder.get_client()
+                    logger.error(f"录制器run方法执行出错: {recorder.flag}, 错误: {run_error}", exc_info=True)
+
+                logger.debug(f"录制执行完成，等待间隔: {recorder.interval}秒")
+                # 等待指定的间隔时间
+                for i in range(recorder.interval):
+                    if not self.running or not task_running:
+                        logger.debug(f"录制已停止，退出等待循环: {recorder.flag}")
+                        break
+                    if i % 10 == 0:  # 每10秒记录一次日志
+                        logger.debug(f"等待中: {recorder.flag}, 已等待{i}秒, 总计{recorder.interval}秒")
+                    await asyncio.sleep(1)  # 每秒检查一次是否需要停止
             except asyncio.CancelledError:
+                logger.info(f"录制任务被取消: {recorder.flag}")
+                task_running = False
                 break
-            except Exception as error:
-                logger.exception(f'{recorder.flag}直播检测错误\n{repr(error)}')
+            except Exception as e:
+                logger.error(f"录制任务异常: {e}", exc_info=True)
+                # 添加短暂休眠，避免因持续错误导致CPU占用过高
+                await asyncio.sleep(5)
+        logger.debug(f"录制任务结束: {recorder.flag}")
 
     async def run(self):
         pass
@@ -323,44 +416,88 @@ class LiveRecorder:
         output_format = self.format if self.format else 'mp4'
         # 获取输出文件名
         filename = self.get_filename(title, output_format)
-        
+
         if not stream:
             logger.error(f'{self.flag}无可用直播源：{filename}')
             return
 
-        logger.info(f'{self.flag}开始录制：{filename}')
-        
-        # 设置定时停止
-        stop_timer = None
-        if duration and duration_unit:
-            try:
-                # 计算总秒数
-                multiplier = 1
-                if duration_unit.lower() == 'minutes':
-                    multiplier = 60
-                elif duration_unit.lower() == 'hours':
-                    multiplier = 3600
-                
-                total_seconds = duration * multiplier
-                stop_timer = threading.Timer(total_seconds, lambda: self.stop_recording(url))
-                stop_timer.start()
-                logger.info(f'{self.flag}设置自动停止：{duration} {duration_unit}后')
-            except Exception as e:
-                logger.error(f'{self.flag}定时器设置失败：{e}')
+        try:
+            logger.debug(f'{self.flag}开始录制：{filename}')
+            logger.debug(f'{self.flag}录制参数：format={format}, duration={duration}, duration_unit={duration_unit}')
 
-        # 调用streamlink录制直播
-        result = self.stream_writer(stream, url, filename)
-        
-        # 如果设置了定时器但录制提前结束，取消定时器
-        if stop_timer:
-            stop_timer.cancel()
-        
-        # 如果源格式不是MP4且需要转换
-        if result and format != output_format:
-            self.run_ffmpeg(filename, format)
-            
-        recording.pop(url, None)
-        logger.info(f'{self.flag}停止录制：{filename}')
+            # 确保输出目录存在
+            output_dir = Path(self.output)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / filename
+            logger.debug(f'{self.flag}输出路径：{output_path}')
+
+            # 创建输出文件
+            logger.debug(f'{self.flag}创建输出文件')
+            output = FileOutput(output_path)
+            logger.debug(f'{self.flag}输出文件创建成功')
+
+            # 记录录制信息
+            recording[url] = (stream, output)
+            logger.debug(f'{self.flag}已添加到录制列表，当前录制数量：{len(recording)}')
+
+            # 设置录制时长
+            if duration and duration_unit:
+                logger.debug(f'{self.flag}设置录制时长：{duration} {duration_unit}')
+                if duration_unit == 'seconds':
+                    timeout = duration
+                elif duration_unit == 'minutes':
+                    timeout = duration * 60
+                elif duration_unit == 'hours':
+                    timeout = duration * 3600
+                else:
+                    timeout = None
+                logger.debug(f'{self.flag}录制超时设置为：{timeout}秒')
+            else:
+                timeout = None
+                logger.debug(f'{self.flag}未设置录制时长，将持续录制')
+
+            # 创建并启动流运行器
+            logger.debug(f'{self.flag}创建StreamRunner')
+            stream_runner = StreamRunner(stream, output)
+            logger.debug(f'{self.flag}开始运行StreamRunner')
+
+            # 使用超时控制录制时长
+            start_time = time.time()
+            try:
+                if timeout:
+                    logger.debug(f'{self.flag}使用超时控制：{timeout}秒')
+                    stream_runner.run(timeout=timeout)
+                    logger.debug(f'{self.flag}录制已达到设定时长，结束录制')
+                else:
+                    logger.debug(f'{self.flag}无超时控制，持续录制')
+                    stream_runner.run()
+                    logger.debug(f'{self.flag}录制已结束')
+            except KeyboardInterrupt:
+                logger.info(f'{self.flag}录制被用户中断')
+            except Exception as e:
+                logger.error(f'{self.flag}录制过程中出错：{e}', exc_info=True)
+            finally:
+                end_time = time.time()
+                duration = end_time - start_time
+                logger.info(f'{self.flag}录制完成，持续时间：{duration:.2f}秒')
+
+                # 清理资源
+                if url in recording:
+                    logger.debug(f'{self.flag}清理录制资源')
+                    del recording[url]
+                    logger.debug(f'{self.flag}录制资源已清理，当前录制数量：{len(recording)}')
+        except Exception as e:
+            logger.error(f'{self.flag}录制失败：{e}', exc_info=True)
+            # 确保清理资源
+            if url in recording:
+                try:
+                    stream_fd, output = recording[url]
+                    stream_fd.close()
+                    output.close()
+                    del recording[url]
+                    logger.debug(f'{self.flag}异常情况下清理录制资源完成')
+                except Exception as cleanup_error:
+                    logger.error(f'{self.flag}清理录制资源失败：{cleanup_error}', exc_info=True)
 
     def stop_recording(self, url):
         """停止指定URL的录制并清理相关线程"""
@@ -388,7 +525,7 @@ class LiveRecorder:
                     stream_fd._close()
             except:
                 pass
-        
+
         try:
             if hasattr(output, 'opened') and output.opened:
                 output.close()
@@ -401,26 +538,26 @@ class LiveRecorder:
                     output._close()
             except:
                 pass
-        
+
         if close_errors:
             logger.warning(f'{self.flag}关闭资源时出错: {" | ".join(close_errors)}')
 
         # 终止相关线程
-        recording_threads = [t for t in threading.enumerate() 
-                           if getattr(t, 'name', '').startswith(f"recording_thread_{url}") or 
-                              getattr(t, '_target', None).__name__ == 'run' and 
+        recording_threads = [t for t in threading.enumerate()
+                           if getattr(t, 'name', '').startswith(f"recording_thread_{url}") or
+                              getattr(t, '_target', None).__name__ == 'run' and
                               getattr(getattr(t, '_target', None), '__self__', None).__class__.__name__ == 'StreamRunner']
-        
+
         for thread in recording_threads:
             try:
                 if thread.is_alive():
                     # 首先尝试优雅地停止线程
                     if hasattr(thread, '_stop_event'):
                         thread._stop_event.set()
-                    
+
                     # 给线程一些时间来清理
                     thread.join(timeout=2.0)
-                    
+
                     # 如果线程仍然活着，使用更激进的方式终止
                     if thread.is_alive():
                         logger.warning(f'{self.flag}强制终止录制线程：{thread.name}')
@@ -452,7 +589,7 @@ class LiveRecorder:
                 logger.debug(f'{self.flag}已更新录制状态')
             except Exception as status_error:
                 logger.warning(f'{self.flag}更新状态时出错: {status_error}')
-            
+
         # 清理录制记录
         try:
             if url in recording:
@@ -493,7 +630,7 @@ class LiveRecorder:
         logger.info(f'{self.flag}开始ffmpeg封装：{filename}')
         temp_filename = filename.replace(f'.{format}', f'_temp.{self.format}')
         new_filename = filename.replace(f'.{format}', f'.{self.format}')
-        
+
         # 先转换到临时文件
         ffmpeg.input(f'{self.output}/{filename}').output(
             f'{self.output}/{temp_filename}',
@@ -501,408 +638,17 @@ class LiveRecorder:
             map_metadata='-1',
             movflags='faststart'
         ).global_args('-hide_banner', '-y').run()
-        
+
         # 删除原文件
         os.remove(f'{self.output}/{filename}')
-        
+
         # 重命名临时文件为最终文件名
         os.rename(f'{self.output}/{temp_filename}', f'{self.output}/{new_filename}')
-
-
-class Bilibili(LiveRecorder):
-    def __init__(self, config: dict, user: dict):
-        """初始化Bilibili录制器
-        
-        Args:
-            config (dict): 配置字典
-            user (dict): 用户配置
-        """
-        super().__init__(config, user)
-        
-    async def run(self):
-        url = f'https://live.bilibili.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url='https://api.live.bilibili.com/room/v1/Room/get_info',
-                params={'room_id': self.id}
-            )).json()
-            if response['data']['live_status'] == 1:
-                title = response['data']['title']
-                stream = self.get_streamlink().streams(url).get('best')  # HTTPStream[flv]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
-
-
-class Douyu(LiveRecorder):
-    def __init__(self, config: dict, user: dict):
-        """初始化斗鱼录制器
-        
-        Args:
-            config (dict): 配置字典
-            user (dict): 用户配置
-        """
-        super().__init__(config, user)
-        
-    async def run(self):
-        url = f'https://www.douyu.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url=f'https://open.douyucdn.cn/api/RoomApi/room/{self.id}',
-            )).json()
-            state = response['data']['room_status']
-            self.mState = state
-            logger.info(
-                f'直播状态[1已开播，2未开播]：{state} 上一次开播时间：{response["data"]["start_time"]}')
-            if state == '1':
-                liveUrl = await self.get_live()
-                if liveUrl != '':
-                    title = response['data']['room_name']
-                    stream = HTTPStream(
-                        self.get_streamlink(),
-                        liveUrl
-                    )  # HTTPStream[flv]
-                    await asyncio.to_thread(
-                        self.run_record,
-                        stream,
-                        url,
-                        title,
-                        'flv',
-                        self.duration,
-                        self.duration_unit
-                    )
-            else:
-                self.ssl = True
-
-    async def get_js(self):
-        response = (await self.request(
-            method='POST',
-            url=f'https://www.douyu.com/swf_api/homeH5Enc?rids={self.id}'
-        )).json()
-        js_enc = response['data'][f'room{self.id}']
-        getUrl = self.crypto_js_url
-        crypto_js = (await self.request(
-            method='GET',
-            url=getUrl
-        )).text
-        return jsengine.JSEngine(js_enc + crypto_js)
-
-    async def get_live(self):
-        did = uuid.uuid4().hex
-        tt = str(int(time.time()))
-        params = {
-            'cdn': 'tct-h5',
-            'did': did,
-            'tt': tt,
-            'rate': 0
-        }
-        js = await self.get_js()
-        query = js.call('ub98484234', self.id, did, tt)
-        params.update({k: v[0] for k, v in parse_qs(query).items()})
-        response = (await self.request(
-            method='POST',
-            url=f'https://www.douyu.com/lapi/live/getH5Play/{self.id}',
-            params=params
-        )).json()
-        if response['data'] == '' and response['msg'] != '':
-            logger.info(f'直播状态：{response["error"]} {response["msg"]}')
-            return ''
-        return f"{response['data']['rtmp_url']}/{response['data']['rtmp_live']}"
-
-
-class Huya(LiveRecorder):
-    def __init__(self, config: dict, user: dict):
-        """初始化虎牙录制器
-        
-        Args:
-            config (dict): 配置字典
-            user (dict): 用户配置
-        """
-        super().__init__(config, user)
-        
-    async def run(self):
-        url = f'https://www.huya.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url=url
-            )).text
-            if '"isOn":true' in response:
-                title = re.search('"introduction":"(.*?)"', response).group(1)
-                stream = self.get_streamlink().streams(url).get('best')  # HTTPStream[flv]
-                await asyncio.to_thread(
-                    self.run_record,
-                    stream,
-                    url,
-                    title,
-                    'flv',
-                    self.duration,
-                    self.duration_unit
-                )
-
-
-class Douyin(LiveRecorder):
-    def __init__(self, config: dict, user: dict):
-        """初始化抖音录制器
-        
-        Args:
-            config (dict): 配置字典
-            user (dict): 用户配置
-        """
-        super().__init__(config, user)
-        
-    async def run(self):
-        url = f'https://live.douyin.com/{self.id}'
-        if url not in recording:
-            if not self.client.cookies:
-                await self.client.get(url='https://live.douyin.com/')  # 获取ttwid
-            response = (await self.request(
-                method='GET',
-                url='https://live.douyin.com/webcast/room/web/enter/',
-                params={
-                    'aid': 6383,
-                    'device_platform': 'web',
-                    'browser_language': 'zh-CN',
-                    'browser_platform': 'Win32',
-                    'browser_name': 'Chrome',
-                    'browser_version': '100.0.0.0',
-                    'web_rid': self.id
-                },
-            )).json()
-            if data := response['data']['data']:
-                data = data[0]
-                if data['status'] == 2:
-                    title = data['title']
-                    live_url = ''
-                    stream_data = json.loads(data['stream_url']['live_core_sdk_data']['pull_data']['stream_data'])
-                    for quality_code in ('origin', 'uhd', 'hd', 'sd', 'md', 'ld'):
-                        if quality_data := stream_data['data'].get(quality_code):
-                            live_url = quality_data['main']['flv']
-                            break
-                    stream = HTTPStream(
-                        self.get_streamlink(),
-                        live_url
-                    )  # HTTPStream[flv]
-                    await asyncio.to_thread(
-                        self.run_record,
-                        stream,
-                        url,
-                        title,
-                        'flv',
-                        self.duration,
-                        self.duration_unit
-                    )
-
-
-class Youtube(LiveRecorder):
-    async def run(self):
-        response = (await self.request(
-            method='POST',
-            url='https://www.youtube.com/youtubei/v1/browse',
-            params={
-                'key': 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
-                'prettyPrint': False
-            },
-            json={
-                'context': {
-                    'client': {
-                        'hl': 'zh-CN',
-                        'clientName': 'MWEB',
-                        'clientVersion': '2.20230101.00.00',
-                        'timeZone': 'Asia/Shanghai'
-                    }
-                },
-                'browseId': self.id,
-                'params': 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D'
-            }
-        )).json()
-        jsonpath = parse('$..videoWithContextRenderer').find(response)
-        for match in jsonpath:
-            video = match.value
-            if '"style": "LIVE"' in json.dumps(video):
-                url = f"https://www.youtube.com/watch?v={video['videoId']}"
-                title = video['headline']['runs'][0]['text']
-                if url not in recording:
-                    stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
-                    # FIXME:多开直播间中断
-                    asyncio.create_task(asyncio.to_thread(self.run_record, stream, url, title, 'ts'))
-
-
-class Twitch(LiveRecorder):
-    async def run(self):
-        url = f'https://www.twitch.tv/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://gql.twitch.tv/gql',
-                headers={'Client-Id': 'kimne78kx3ncx6brgo4mv6wki5h1ko'},
-                json=[{
-                    'operationName': 'StreamMetadata',
-                    'variables': {'channelLogin': self.id},
-                    'extensions': {
-                        'persistedQuery': {
-                            'version': 1,
-                            'sha256Hash': 'a647c2a13599e5991e175155f798ca7f1ecddde73f7f341f39009c14dbf59962'
-                        }
-                    }
-                }]
-            )).json()
-            if response[0]['data']['user']['stream']:
-                title = response[0]['data']['user']['lastBroadcast']['title']
-                options = Options()
-                options.set('disable-ads', True)
-                stream = self.get_streamlink().streams(url, options).get('best')  # HLSStream[mpegts]
-                await asyncio.to_thread(
-                    self.run_record,
-                    stream,
-                    url,
-                    title,
-                    'ts',
-                    self.duration,
-                    self.duration_unit
-                )
-
-
-class Niconico(LiveRecorder):
-    async def run(self):
-        url = f'https://live.nicovideo.jp/watch/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url=url
-            )).text
-            if '"content_status":"ON_AIR"' in response:
-                title = json.loads(
-                    re.search(r'<script type="application/ld\+json">(.*?)</script>', response).group(1)
-                )['name']
-                stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts', self.duration, self.duration_unit)
-
-
-class Twitcasting(LiveRecorder):
-    async def run(self):
-        url = f'https://twitcasting.tv/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url='https://twitcasting.tv/streamserver.php',
-                params={
-                    'target': self.id,
-                    'mode': 'client'
-                }
-            )).json()
-            if response:
-                response = (await self.request(
-                    method='GET',
-                    url=url
-                )).text
-                title = re.search('<meta name="twitter:title" content="(.*?)">', response).group(1)
-                stream = self.get_streamlink().streams(url).get('best')  # Stream[mp4]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'mp4', self.duration, self.duration_unit)
-
-
-class Afreeca(LiveRecorder):
-    async def run(self):
-        url = f'https://play.afreecatv.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://live.afreecatv.com/afreeca/player_live_api.php',
-                data={'bid': self.id}
-            )).json()
-            if response['CHANNEL']['RESULT'] != 0:
-                title = response['CHANNEL']['TITLE']
-                stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts', self.duration, self.duration_unit)
-
-
-async def run(self):
-    url = f'https://www.pandalive.co.kr/live/play/{self.id}'
-    if url not in recording:
-        response = (await self.request(
-            method='POST',
-            url='https://api.pandalive.co.kr/v1/live/play',
-            headers={
-                'x-device-info': '{"t":"webMobile","v":"1.0","ui":0}'
-            },
-            data={
-                'action': 'watch',
-                'userId': self.id
-            }
-        )).json()
-        if response['result']:
-            title = response['media']['title']
-            stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
-            await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
-
-
-class Bigolive(LiveRecorder):
-    async def run(self):
-        url = f'https://www.bigo.tv/cn/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://ta.bigo.tv/official_website/studio/getInternalStudioInfo',
-                params={'siteId': self.id}
-            )).json()
-            if response['data']['alive']:
-                title = response['data']['roomTopic']
-                stream = HLSStream(
-                    session=self.get_streamlink(),
-                    url=response['data']['hls_src']
-                )  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts', self.duration, self.duration_unit)
-
-
-class Pixivsketch(LiveRecorder):
-    async def run(self):
-        url = f'https://sketch.pixiv.net/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='GET',
-                url=url
-            )).text
-            next_data = json.loads(re.search(r'<script id="__NEXT_DATA__".*?>(.*?)</script>', response)[1])
-            initial_state = json.loads(next_data['props']['pageProps']['initialState'])
-            if lives := initial_state['live']['lives']:
-                live = list(lives.values())[0]
-                title = live['name']
-                streams = HLSStream.parse_variant_playlist(
-                    session=self.get_streamlink(),
-                    url=live['owner']['hls_movie']
-                )
-                stream = list(streams.values())[0]  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
-
-
-class Chaturbate(LiveRecorder):
-    async def run(self):
-        url = f'https://chaturbate.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://chaturbate.com/get_edge_hls_url_ajax/',
-                headers={
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                data={
-                    'room_slug': self.id
-                }
-            )).json()
-            if response['room_status'] == 'public':
-                title = self.id
-                streams = HLSStream.parse_variant_playlist(
-                    session=self.get_streamlink(),
-                    url=response['url']
-                )
-                stream = list(streams.values())[2]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts', self.duration, self.duration_unit)
-
 
 class Kwai(LiveRecorder):
     def __init__(self, config: dict, user: dict):
         """初始化快手录制器
-        
+
         Args:
             config (dict): 配置字典
             user (dict): 用户配置
@@ -916,7 +662,7 @@ class Kwai(LiveRecorder):
         self.config_manager = type('ConfigManager', (), {
             'get_global_config': lambda self, key: config.get(key)
         })()  # 创建配置管理器对象
-        
+
     async def create_signature(self, query_str: str, post_dict: dict) -> str:
         # 解析 query_str 为字典
         query_obj = {}
@@ -987,7 +733,7 @@ class Kwai(LiveRecorder):
                 # 自动补全协议前缀
                 if not proxy_config.startswith(('http://', 'https://', 'socks5://')):
                     proxy_config = 'http://' + proxy_config
-                
+
                 # 根据协议类型设置proxies
                 if proxy_config.startswith('socks5://'):
                     try:
@@ -1004,7 +750,7 @@ class Kwai(LiveRecorder):
                         'http': proxy_config,
                         'https': proxy_config
                     }
-            
+
             resp = requests.post(url + query, data=data, headers=headers,
                                proxies=use_proxies, verify=False, timeout=10)
         resp.raise_for_status()
@@ -1038,30 +784,52 @@ class Kwai(LiveRecorder):
         url = f''
         if url not in recording:
             try:
+                logger.debug(f"{self.flag} 开始获取直播URL")
                 live_url = await self.get_live_url()
+                logger.debug(f"{self.flag} 获取到直播URL: {live_url}")
                 if live_url:
                     self.mState = "1"  # 设置为直播中状态
                     title = self.name.replace(" ", "")  # 使用name作为标题
-                    stream = HTTPStream(
-                        self.get_streamlink(),
-                        live_url
-                    )  # HTTPStream[flv]
-                    url = live_url
-                    # 明确指定文件格式为flv，确保正确转换
-                    await asyncio.to_thread(
-                        self.run_record, 
-                        stream, 
-                        url, 
-                        title, 
-                        'flv',  # 明确指定输入格式
-                        self.duration, 
-                        self.duration_unit
-                    )
+                    logger.debug(f"{self.flag} 创建HTTPStream")
+                    try:
+                        # 添加超时处理
+                        with asyncio.timeout(30):  # 设置30秒超时
+                            logger.debug(f"{self.flag} 开始创建HTTPStream对象")
+                            stream = HTTPStream(
+                                self.get_streamlink(),
+                                live_url
+                            )  # HTTPStream[flv]
+                            logger.debug(f"{self.flag} HTTPStream对象创建成功: {stream}")
+                            url = live_url
+                            # 明确指定文件格式为flv，确保正确转换
+                            logger.debug(f"{self.flag} 准备开始录制，格式: flv, 时长: {self.duration} {self.duration_unit}")
+
+                            # 使用超时保护的方式调用run_record
+                            try:
+                                logger.debug(f"{self.flag} 开始调用run_record")
+                                await asyncio.to_thread(
+                                    self.run_record,
+                                    stream,
+                                    url,
+                                    title,
+                                    'flv',  # 明确指定输入格式
+                                    self.duration,
+                                    self.duration_unit
+                                )
+                                logger.debug(f"{self.flag} run_record调用完成")
+                            except Exception as e:
+                                logger.error(f"{self.flag} run_record执行失败: {e}", exc_info=True)
+                    except asyncio.TimeoutError:
+                        logger.error(f"{self.flag} 创建或运行HTTPStream超时")
+                    except Exception as e:
+                        logger.error(f"{self.flag} 创建或运行HTTPStream失败: {e}", exc_info=True)
                 else:
                     self.mState = "2"  # 设置为未开播状态
-            except Exception as error:
-                logger.error(f'{self.flag}获取直播流失败：{error}')
-                self.mState = "2"  # 发生错误时设置为未开播状态
+                    logger.info(f"{self.flag} 未获取到直播URL，可能未开播")
+            except Exception as e:
+                logger.error(f"{self.flag} 运行录制任务失败: {e}", exc_info=True)
+                # 添加短暂休眠，避免立即重试导致CPU占用过高
+                await asyncio.sleep(5)
 
 
 async def run():

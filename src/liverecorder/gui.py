@@ -2,14 +2,11 @@ import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN, ROW, CENTER, LEFT
 import os
-import sys
-from pathlib import Path
 import asyncio
 import threading
 import re
 import logging
 from datetime import datetime
-from .live_recorder import LiveRecorder
 from .config_manager import ConfigManager
 
 # 配置日志
@@ -26,6 +23,7 @@ class GuiLogHandler(logging.Handler):
     def emit(self, record):
         try:
             msg = self.format(record)
+            print(f"CONSOLE LOG: {msg}")  # 添加控制台日志输出
             # 使用asyncio.create_task替代已弃用的add_background_task
             asyncio.create_task(self._update_log(msg))
         except Exception as e:
@@ -66,6 +64,10 @@ class LiveRecorderApp(toga.App):
         self.recorder = None
         self.recorder_threads = []  # 初始化录制线程列表
         self.recording = False
+
+        # 用户录制状态跟踪
+        self.user_recorders = {}  # {user_id: recorder_instance}
+        self.user_recording_status = {}  # {user_id: True/False}
         self.config_manager = ConfigManager()
         self.current_user = None  # 当前选中的用户
         self._is_exiting = False  # 标记应用是否正在退出
@@ -76,12 +78,10 @@ class LiveRecorderApp(toga.App):
             for thread in self.recorder_threads:
                 thread.stop_recording()
                 thread.join(timeout=5)
-        
+
         # 直接返回True允许正常退出
         return True
 
-        
-        
 
     def add_log(self, message):
         """添加日志到日志输出区域"""
@@ -109,11 +109,11 @@ class LiveRecorderApp(toga.App):
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.DEBUG)
         logger.addHandler(console_handler)
-        
+
         # 配置loguru日志拦截器，将loguru日志重定向到标准logging
         from loguru import logger as loguru_logger
         import sys
-        
+
         class InterceptHandler(logging.Handler):
             def emit(self, record):
                 # 获取对应的loguru级别
@@ -121,26 +121,26 @@ class LiveRecorderApp(toga.App):
                     level = loguru_logger.level(record.levelname).name
                 except ValueError:
                     level = record.levelno
-                
+
                 # 找到调用者的帧
                 frame, depth = logging.currentframe(), 2
                 while frame.f_code.co_filename == logging.__file__:
                     frame = frame.f_back
                     depth += 1
-                
+
                 # 将日志记录转发给loguru
                 loguru_logger.opt(depth=depth, exception=record.exc_info).log(
                     level, record.getMessage()
                 )
-        
+
         # 拦截所有来自live_recorder模块的日志
         logging.getLogger("liverecorder").handlers = [InterceptHandler()]
-        
+
         # 配置loguru将日志发送到GUI
         loguru_logger.configure(handlers=[
             {"sink": lambda msg: self.add_log(msg), "format": "{message}"}
         ])
-        
+
         # 测试日志
         logger.info("GUI日志系统初始化完成")
         loguru_logger.info("Loguru日志系统已连接到GUI")
@@ -163,7 +163,7 @@ class LiveRecorderApp(toga.App):
 
         # 录制按钮
         self.record_button = toga.Button(
-            '开始录制',
+            '开始全部录制',
             on_press=self.toggle_recording,
             style=Pack(flex=1, margin=2)
         )
@@ -296,6 +296,22 @@ class LiveRecorderApp(toga.App):
         user_buttons_box.add(self.delete_user_button)
         user_config_box.add(user_buttons_box)
 
+        # 单个用户录制控制按钮
+        user_record_buttons_box = toga.Box(style=Pack(direction=ROW, margin=2))
+        self.start_user_record_button = toga.Button(
+            '开始录制选中用户',
+            on_press=self.start_selected_user_recording,
+            style=Pack(flex=1, margin=2)
+        )
+        self.stop_user_record_button = toga.Button(
+            '停止录制选中用户',
+            on_press=self.stop_selected_user_recording,
+            style=Pack(flex=1, margin=2)
+        )
+        user_record_buttons_box.add(self.start_user_record_button)
+        user_record_buttons_box.add(self.stop_user_record_button)
+        user_config_box.add(user_record_buttons_box)
+
         settings_content.add(user_config_box)
 
         # 用户列表
@@ -304,10 +320,10 @@ class LiveRecorderApp(toga.App):
 
         # 创建并初始化表格
         self.users_table = toga.Table(
-            headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位'],
-            accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit'],
+            headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态', '操作'],
+            accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status', 'action'],
             data=[],
-            style=Pack(flex=1, width=800),
+            style=Pack(flex=1, width=1000),
             on_select=self.on_user_selected,
             multiple_select=False,
             missing_value=''
@@ -394,14 +410,19 @@ class LiveRecorderApp(toga.App):
             # 为Table组件准备数据
             table_data = []
             for user in users:
+                user_id = user.get('id')
+                is_recording = self.user_recording_status.get(user_id, False)
+
                 # 创建表格行数据（使用字典格式配合accessors）
                 row_data = {
                     'id': str(user.get('id', '')),
                     'platform': str(user.get('platform', 'Kwai')),
                     'name': str(user.get('name', '')),
-                    'interval': str(user.get('interval', 30)),
-                    'duration': str(user.get('duration', '')),
+                    'interval': str(user.get('interval', 10)),
+                    'duration': str(user.get('duration', '')) if user.get('duration') else '',
                     'duration_unit': str(user.get('duration_unit', 'seconds')),
+                    'status': '录制中' if is_recording else '未录制',
+                    'action': '停止录制' if is_recording else '开始录制'
                 }
                 table_data.append(row_data)
                 print(f"Added row: {row_data}")  # 调试信息
@@ -667,73 +688,353 @@ class LiveRecorderApp(toga.App):
             )
 
     def on_user_selected(self, table):
+        """处理用户选择事件"""
+        print(f"User selected: {table.selection}")
 
         row = table.selection
         self.current_user = None
-        if row:
-            user_id = row.id
-            self.current_user = self.config_manager.get_user_by_id(user_id)
-            if self.current_user:
-                self.platform_select.value = self.current_user['platform']
-                self.name_input.value = self.current_user['name']
-                self.interval_input.value = str(self.current_user['interval'])
+
         # 处理空选择
         if not row:
             self.clear_user_form()
             self.update_user_button.enabled = False
             self.delete_user_button.enabled = False
+            self.start_user_record_button.enabled = False
+            self.stop_user_record_button.enabled = False
             return
-            
+
         # 获取选中行的用户ID
-        user_id = row.id
-        
+        user_id = int(row.id)
+
         # 加载完整用户数据
         user_data = self.config_manager.get_user_by_id(user_id)
-        
-        # 更新表单字段
-        self.name_input.value = user_data['name']
-        self.platform_select.value = user_data['platform']
-        self.interval_input.value = str(user_data['interval'])
-        self.duration_input.value = str(user_data['duration']) if user_data['duration'] else ''
-        self.unit_select.value = user_data['duration_unit'] if user_data['duration_unit'] else 'seconds'
-        
-        # 启用操作按钮
-        self.update_user_button.enabled = True
-        self.delete_user_button.enabled = True
+        self.current_user = user_data
 
-    async def toggle_recording(self, widget):
+        if user_data:
+            # 更新表单字段
+            self.name_input.value = user_data['name']
+            self.platform_select.value = user_data['platform']
+            self.interval_input.value = str(user_data['interval'])
+            self.duration_input.value = str(user_data['duration']) if user_data['duration'] else ''
+            self.unit_select.value = user_data['duration_unit'] if user_data['duration_unit'] else 'seconds'
+
+            # 启用操作按钮
+            self.update_user_button.enabled = True
+            self.delete_user_button.enabled = True
+
+            # 根据录制状态启用/禁用单个用户录制按钮
+            is_recording = self.user_recording_status.get(user_id, False)
+            self.start_user_record_button.enabled = not is_recording
+            self.stop_user_record_button.enabled = is_recording
+
+    async def toggle_user_recording(self, user_id):
+        """切换单个用户的录制状态"""
+        try:
+            user_data = self.config_manager.get_user_by_id(user_id)
+            if not user_data:
+                await self.show_info_message('错误', '用户不存在')
+                return
+
+            is_recording = self.user_recording_status.get(user_id, False)
+
+            if not is_recording:
+                # 开始录制该用户
+                await self.start_user_recording(user_id, user_data)
+            else:
+                # 停止录制该用户
+                await self.stop_user_recording(user_id)
+
+            # 刷新表格显示
+            self.refresh_users_table()
+
+            # 如果当前选中的用户状态发生变化，更新按钮状态
+            if self.current_user and self.current_user['id'] == user_id:
+                is_recording = self.user_recording_status.get(user_id, False)
+                self.start_user_record_button.enabled = not is_recording
+                self.stop_user_record_button.enabled = is_recording
+
+        except Exception as e:
+            logger.error(f"切换用户录制状态失败: {str(e)}", exc_info=True)
+            await self.show_info_message('错误', f'操作失败: {str(e)}')
+
+    async def start_user_recording(self, user_id, user_data):
+        """开始录制指定用户"""
+        try:
+            # 验证输出目录
+            output_dir = self.config_manager.get_global_config('output', '')
+            # 如果GUI中没有设置输出目录，则不传递output到LiveRecorder，让其使用默认值
+            if not output_dir:
+                logger.info("GUI中未设置输出目录，将使用LiveRecorder的默认输出目录。")
+            elif not os.path.isdir(output_dir):
+                await self.show_info_message('错误', '请先设置有效的输出目录')
+                return
+
+            # 创建单用户配置
+            config = {
+                'proxy': self.config_manager.get_global_config('proxy', ''),
+                'output': output_dir,
+                'user': [user_data]  # 只包含当前用户
+            }
+
+            # 使用asyncio.create_task在后台启动录制，避免阻塞GUI
+            task = asyncio.create_task(self._start_user_recording_task(user_id, user_data, config))
+
+            logger.info(f"正在启动用户 {user_data['name']} 的录制...")
+            await self.show_info_message('提示', f"正在启动用户 {user_data['name']} 的录制...")
+
+        except Exception as e:
+            logger.error(f"启动用户录制失败: {str(e)}", exc_info=True)
+            await self.show_info_message('错误', f'启动录制失败: {str(e)}')
+
+    async def _start_user_recording_task(self, user_id, user_data, config):
+        """在后台线程中启动用户录制的异步任务"""
+        try:
+            # 直接在后台线程中创建录制器，不使用线程池等待
+            def create_recorder_and_start():
+                """在独立线程中创建录制器并启动录制循环"""
+                try:
+                    from .live_recorder import LiveRecorder
+                    recorder = LiveRecorder(config)
+                    run_loop = recorder.start()
+
+                    # 保存录制器引用（在主线程中访问需要线程安全）
+                    self.user_recorders[user_id] = recorder
+
+                    # 直接在此线程中运行录制循环
+                    if run_loop:
+                        logger.info(f"用户 {user_data['name']} 录制循环开始运行")
+                        run_loop()  # 这会阻塞当前线程，但不会阻塞GUI
+                        logger.info(f"用户 {user_data['name']} 录制循环结束")
+
+                except Exception as e:
+                    logger.error(f"用户 {user_data['name']} 录制线程执行失败: {str(e)}", exc_info=True)
+                finally:
+                    # 清理录制状态
+                    if user_id in self.user_recorders:
+                        del self.user_recorders[user_id]
+                    if user_id in self.user_recording_status:
+                        self.user_recording_status[user_id] = False
+
+            # 创建并启动录制线程
+            record_thread = threading.Thread(
+                target=create_recorder_and_start,
+                daemon=True,
+                name=f"recording_user_{user_id}"
+            )
+            record_thread.start()
+
+            # 保存线程引用
+            self.recorder_threads.append(record_thread)
+
+            # 更新用户录制状态
+            self.user_recording_status[user_id] = True
+
+            # 刷新界面
+            self.refresh_users_table()
+            if self.current_user and self.current_user['id'] == user_id:
+                self.start_user_record_button.enabled = False
+                self.stop_user_record_button.enabled = True
+
+            logger.info(f"用户 {user_data['name']} 录制任务已启动")
+            await self.show_info_message('成功', f"用户 {user_data['name']} 录制任务已启动")
+
+        except Exception as e:
+            logger.error(f"启动用户录制失败: {str(e)}", exc_info=True)
+            await self.show_info_message('错误', f'启动录制失败: {str(e)}')
+
+    async def _start_global_recording_task(self, config):
+        """在后台线程中启动全局录制的异步任务"""
+        try:
+            # 直接在后台线程中创建录制器，不使用线程池等待
+            def create_recorder_and_start():
+                """在独立线程中创建录制器并启动录制循环"""
+                try:
+                    from .live_recorder import LiveRecorder
+                    recorder = LiveRecorder(config)
+                    run_loop = recorder.start()
+
+                    # 保存录制器引用
+                    self.recorder = recorder
+
+                    # 直接在此线程中运行录制循环
+                    if run_loop:
+                        logger.info("全局录制循环开始运行")
+                        run_loop()  # 这会阻塞当前线程，但不会阻塞GUI
+                        logger.info("全局录制循环结束")
+
+                except Exception as e:
+                    logger.error(f"全局录制线程执行失败: {str(e)}", exc_info=True)
+                finally:
+                    # 清理录制状态
+                    self.recording = False
+                    if hasattr(self, 'recorder'):
+                        self.recorder = None
+
+            # 创建并启动录制线程
+            record_thread = threading.Thread(
+                target=create_recorder_and_start,
+                daemon=True,
+                name="recording_main_thread"
+            )
+            record_thread.start()
+
+            # 保存线程引用
+            self.recorder_threads.append(record_thread)
+
+            # 重新启用按钮
+            self.record_button.enabled = True
+
+            logger.info("全局录制任务已启动")
+            await self.show_info_message('成功', '全局录制任务已启动')
+
+        except Exception as e:
+            logger.error(f"启动全局录制失败: {str(e)}", exc_info=True)
+
+            # 启动失败，重置状态
+            self.recording = False
+            self.record_button.text = "开始全部录制"
+            self.record_button.enabled = True
+            del self.record_button.style.color
+
+            await self.show_info_message('错误', f'启动全局录制失败: {str(e)}')
+
+    async def stop_user_recording(self, user_id):
+        """停止录制指定用户"""
+        try:
+            recorder = self.user_recorders.get(user_id)
+            if recorder:
+                recorder.stop()
+                del self.user_recorders[user_id]
+
+            self.user_recording_status[user_id] = False
+
+            user_data = self.config_manager.get_user_by_id(user_id)
+            user_name = user_data['name'] if user_data else f'用户{user_id}'
+
+            logger.info(f"用户 {user_name} 停止录制")
+            await self.show_info_message('成功', f"用户 {user_name} 停止录制")
+
+        except Exception as e:
+            logger.error(f"停止用户录制失败: {str(e)}", exc_info=True)
+            await self.show_info_message('错误', f'停止录制失败: {str(e)}')
+
+    async def start_selected_user_recording(self, widget):
+        """开始录制选中的用户"""
+        if not self.current_user:
+            await self.show_info_message('错误', '请先选择一个用户')
+            return
+
+        user_id = self.current_user['id']
+        await self.toggle_user_recording(user_id)
+
+    async def stop_selected_user_recording(self, widget):
+        """停止录制选中的用户"""
+        if not self.current_user:
+            await self.show_info_message('错误', '请先选择一个用户')
+            return
+
+        user_id = self.current_user['id']
+        await self.toggle_user_recording(user_id)
+
+    def toggle_recording(self, widget):
         """切换录制状态"""
         try:
             if not self.recording:
                 # 开始录制
+                logger.debug("开始验证录制条件")
                 if not self.validate_recording_conditions():
+                    logger.warning("录制条件验证失败")
                     return
 
                 self.recording = True
-                self.record_button.text = "停止录制"
+                self.record_button.text = "停止全部录制"
                 self.record_button.style.color = "red"
-                self.record_button.on_press = False
+                self.record_button.enabled = False  # 暂时禁用按钮防止重复点击
 
-                # 初始化录制器
-                config = self.config_manager.export_config()
-                self.recorder = LiveRecorder(config)
+                # 导出配置
+                exported_config = self.config_manager.export_config()
+                
+                # 准备传递给 LiveRecorder 的配置
+                live_recorder_config = {}
+                if 'proxy' in exported_config:
+                    live_recorder_config['proxy'] = exported_config['proxy']
+                if 'user' in exported_config:
+                    live_recorder_config['user'] = exported_config['user']
+                
+                # 只有当 output_dir 在导出配置中存在且有效时才添加到config
+                output_dir_from_config = exported_config.get('output', '')
+                if output_dir_from_config and os.path.isdir(output_dir_from_config):
+                    live_recorder_config['output'] = output_dir_from_config
+                else:
+                    logger.info("全局配置中未设置有效输出目录，将使用LiveRecorder的默认输出目录。")
 
-                # 在后台线程中启动录制
-                threading.Thread(
-                    target=self.recorder.start,
-                    daemon=True
-                ).start()
+                # 创建后台线程来处理录制
+                def record_task():
+                    try:
+                        from .live_recorder import LiveRecorder
+                        self.recorder = LiveRecorder(live_recorder_config) # 使用处理过的配置
+                        run_loop = self.recorder.start()
+                        if run_loop:
+                            logger.info("录制循环开始运行")
+                            run_loop()
+                    except Exception as e:
+                        logger.error(f"录制线程执行失败: {str(e)}", exc_info=True)
+                        # 使用主线程安全的方式更新UI
+                        self.main_window.add_background_task(self._handle_recording_error)
 
-                logger.info("录制已启动")
+                # 启动录制线程
+                record_thread = threading.Thread(
+                    target=record_task,
+                    daemon=True,
+                    name="recording_main_thread"
+                )
+                record_thread.start()
+                self.recorder_threads.append(record_thread)
+
+                logger.info("录制任务已启动")
+                self.record_button.enabled = True  # 重新启用按钮
+
             else:
                 # 停止录制
+                logger.debug("开始停止录制过程")
                 self.recording = False
-                self.record_button.text = "开始录制"
+                self.record_button.text = "开始全部录制"
+                self.record_button.enabled = True
                 del self.record_button.style.color
 
+                # 停止全局录制器
                 if self.recorder:
+                    logger.debug("正在停止全局录制器")
                     self.recorder.stop()
-                    logger.info("录制已停止")
+                    logger.debug("全局录制器已停止")
+
+                # 停止所有单个用户录制
+                for user_id in list(self.user_recorders.keys()):
+                    recorder = self.user_recorders[user_id]
+                    if recorder:
+                        recorder.stop()
+                    del self.user_recorders[user_id]
+                    self.user_recording_status[user_id] = False
+
+                # 清理录制线程（不阻塞主线程）
+                def cleanup_threads():
+                    for thread in self.recorder_threads:
+                        if thread.is_alive():
+                            thread.join(timeout=0.1)
+                    self.recorder_threads = [t for t in self.recorder_threads if t.is_alive()]
+                    logger.debug(f"剩余活动线程数: {len(self.recorder_threads)}")
+                    # 在主线程中刷新表格
+                    self.main_window.add_background_task(self.refresh_users_table)
+
+                cleanup_thread = threading.Thread(
+                    target=cleanup_threads,
+                    daemon=True,
+                    name="cleanup_thread"
+                )
+                cleanup_thread.start()
+
+                logger.info("录制已停止")
+
         except Exception as e:
             logger.error(f"切换录制状态失败: {str(e)}", exc_info=True)
             self.main_window.info_dialog(
@@ -742,8 +1043,20 @@ class LiveRecorderApp(toga.App):
             )
             # 确保状态重置
             self.recording = False
-            self.record_button.text = "开始录制"
-            self.record_button.style.color = None
+            self.record_button.text = "开始全部录制"
+            self.record_button.enabled = True
+            del self.record_button.style.color
+
+    def _handle_recording_error(self, *args):
+        """处理录制错误的回调函数"""
+        self.recording = False
+        self.record_button.text = "开始全部录制"
+        self.record_button.enabled = True
+        del self.record_button.style.color
+        self.main_window.info_dialog(
+            '错误',
+            '录制过程发生错误，已停止录制'
+        )
 
     def validate_recording_conditions(self):
         """验证录制条件"""

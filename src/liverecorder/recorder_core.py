@@ -4,7 +4,7 @@ from datetime import datetime
 from utils.path_utils import sanitize_filename, generate_output_path
 
 class LiveRecorder:
-    def __init__(self, output_base="D:/111"):
+    def __init__(self, output_base="d:\\"):
         self.output_base = output_base
         os.makedirs(output_base, exist_ok=True)
 

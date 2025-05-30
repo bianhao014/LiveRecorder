@@ -1,16 +1,59 @@
 [build-system]
 requires = ["briefcase"]
 
+[project]
+name = "liverecorder"
+version = "1.0.0"
+description = "基于Streamlink的全自动直播录制工具"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = [
+    "streamlink>=6.8.2",
+    "httpx[http2]>=0.27.0",
+    "ffmpeg-python>=0.2.0",
+    "loguru>=0.7.2",
+    "jsonpath-ng>=1.6.1",
+    "jsengine>=1.0.7.post1",
+    "quickjs>=1.19.4",
+    "httpx-socks[asyncio]>=0.9.1",
+    "PyQt6>=6.4.2"
+]
+
 [tool.briefcase]
 project_name = "LiveRecorder"
-bundle = "org.beeware.toga.examples"
-version = "0.0.1"
-url = "https://ly.com"
-license.file = "LICENSE"
-author = "Jack"
-author_email = "ly@ly.com"
+bundle = "com.example"
+version = "1.0.0"
+url = "https://github.com/yourusername/liverecorder"
+license = "MIT"
+author = "Your Name"
+author_email = "your.email@example.com"
 
 [tool.briefcase.app.liverecorder]
 formal_name = "LiveRecorder"
-description = "直播录制工具"
+description = "基于Streamlink的全自动直播录制工具"
+icon = "utils/icon.ico"
 sources = ["src/liverecorder"]
+requires = [
+    "streamlink>=6.8.2",
+    "httpx[http2]>=0.27.0",
+    "ffmpeg-python>=0.2.0",
+    "loguru>=0.7.2",
+    "jsonpath-ng>=1.6.1",
+    "jsengine>=1.0.7.post1",
+    "quickjs>=1.19.4",
+    "httpx-socks[asyncio]>=0.9.1",
+    "toga>=0.5.1"
+]
+app_module = "liverecorder"
+
+[tool.briefcase.app.liverecorder.windows]
+requires = []
+
+[tool.briefcase.app.liverecorder.macOS]
+requires = []
+
+[tool.briefcase.app.liverecorder.linux]
+requires = []
