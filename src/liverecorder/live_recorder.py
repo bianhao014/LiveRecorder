@@ -4,7 +4,7 @@ import os
 import re
 import time
 import threading
-import uuid
+
 import warnings
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
@@ -42,17 +42,19 @@ recording: Dict[str, Tuple[StreamIO, FileOutput]] = {}
 
 
 class LiveRecorder:
-    def __init__(self, config: dict, user: dict = None, proxies=None):
+    def __init__(self, config: dict, user: dict = None, proxies=None, gui_timeout_callback=None):
         """初始化直播录制器
 
         Args:
             config (dict): 配置字典，包含全局配置
             user (dict, optional): 用户特定的配置。如果提供，将立即初始化录制器配置
             proxies (dict, optional): 代理配置字典
+            gui_timeout_callback (callable, optional): GUI超时回调函数
         """
         # 保存完整配置
         self.config = config
         self.proxies = proxies
+        self.gui_timeout_callback = gui_timeout_callback
 
         # 初始化录制状态
         self.running = False
@@ -110,7 +112,7 @@ class LiveRecorder:
         try:
             # 创建对应平台的录制实例
             platform_class = globals()[user['platform']]
-            recorder = platform_class(self.config, user)
+            recorder = platform_class(self.config, user, gui_timeout_callback=self.gui_timeout_callback)
 
             # 启动新的录制任务
             task = self.loop.create_task(self._record_task(recorder))
@@ -211,7 +213,7 @@ class LiveRecorder:
                         try:
                             platform_class = globals()[user['platform']]
                             logger.debug(f"成功获取平台类: {platform_class.__name__}")
-                            recorder = platform_class(self.config, user)
+                            recorder = platform_class(self.config, user, gui_timeout_callback=self.gui_timeout_callback)
                             logger.debug(f"成功创建录制实例: {recorder}")
 
                             # 启动录制任务
@@ -252,28 +254,92 @@ class LiveRecorder:
         logger.debug("开始停止录制")
         self.running = False
 
-        # 取消所有任务
+        # 取消所有任务 - 使用线程安全的方式
         if self.tasks:
             logger.debug(f"取消 {len(self.tasks)} 个录制任务")
-            for task in self.tasks:
-                if not task.done():
-                    logger.debug(f"取消任务: {task}")
-                    task.cancel()
-            self.tasks = []
+            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                # 在事件循环线程中安全地取消任务
+                def cancel_tasks():
+                    for task in self.tasks:
+                        if not task.done():
+                            logger.debug(f"取消任务: {task}")
+                            task.cancel()
+                
+                self.loop.call_soon_threadsafe(cancel_tasks)
+                
+                # 等待任务完成清理（在主线程中等待）
+                import time
+                import asyncio
+                start_time = time.time()
+                pending_tasks = []
+                
+                # 确保事件循环能够处理取消请求
+                try:
+                    # 创建一个新的事件循环来处理任务取消
+                    temp_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(temp_loop)
+                    
+                    # 复制任务列表，以便在新的事件循环中处理
+                    tasks_to_cancel = [task for task in self.tasks if not task.done()]
+                    
+                    if tasks_to_cancel:
+                        logger.debug(f"使用临时事件循环处理 {len(tasks_to_cancel)} 个任务的取消")
+                        # 创建一个Future来等待任务取消
+                        done_future = asyncio.Future(loop=temp_loop)
+                        
+                        # 监控任务状态的回调
+                        def check_tasks_done():
+                            if all(task.done() for task in tasks_to_cancel):
+                                if not done_future.done():
+                                    done_future.set_result(True)
+                            else:
+                                # 继续检查
+                                temp_loop.call_later(0.1, check_tasks_done)
+                        
+                        # 开始检查
+                        temp_loop.call_soon(check_tasks_done)
+                        
+                        # 等待所有任务完成或超时
+                        try:
+                            temp_loop.run_until_complete(asyncio.wait_for(done_future, timeout=3.0))
+                            logger.debug("所有任务已在临时事件循环中完成清理")
+                        except asyncio.TimeoutError:
+                            logger.warning("等待任务取消超时")
+                except Exception as e:
+                    logger.error(f"使用临时事件循环处理任务取消时出错: {e}")
+                finally:
+                    # 关闭临时事件循环
+                    try:
+                        temp_loop.close()
+                    except Exception as e:
+                        logger.error(f"关闭临时事件循环时出错: {e}")
+                
+                # 再次检查主线程中的任务状态
+                pending_tasks = [task for task in self.tasks if not task.done()]
+                if pending_tasks:
+                    logger.warning(f"仍有 {len(pending_tasks)} 个任务未完成清理，强制继续")
+                else:
+                    logger.debug("所有任务已完成清理")
+                
+                self.tasks = []
+            else:
+                # 如果事件循环不在运行，直接清空任务列表
+                self.tasks = []
 
         # 关闭所有直播流
         for stream_fd, output in recording.copy().values():
             logger.debug(f"关闭直播流: {stream_fd}")
-            stream_fd.close()
-            output.close()
+            try:
+                stream_fd.close()
+                output.close()
+            except Exception as e:
+                logger.warning(f"关闭流时出错: {e}")
 
         # 停止事件循环
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             logger.debug("停止事件循环")
             self.loop.call_soon_threadsafe(self.loop.stop)
-            if hasattr(self, 'loop'):
-                self.loop.close()
-            logger.debug("事件循环已停止")
+            logger.debug("事件循环停止信号已发送")
 
         logger.debug("录制已完全停止")
 
@@ -299,12 +365,16 @@ class LiveRecorder:
 
                 # 设置超时保护
                 try:
-                    # 使用超时运行录制方法，防止无限阻塞
+                    # 直接调用异步的录制方法
                     logger.debug(f"开始执行录制器的run方法: {recorder.flag}")
-                    await asyncio.wait_for(recorder.run(), timeout=60)  # 设置60秒超时
+                    # 直接调用异步的run方法，设置超时
+                    await asyncio.wait_for(
+                        recorder.run(),
+                        timeout=300  # 增加超时时间到5分钟，给录制更多时间
+                    )
                     logger.debug(f"录制器run方法执行完成: {recorder.flag}")
                 except asyncio.TimeoutError:
-                    logger.error(f"录制器run方法执行超时(60秒): {recorder.flag}，可能是网络问题或直播源获取失败")
+                    logger.error(f"录制器run方法执行超时(300秒): {recorder.flag}，可能是网络问题或直播源获取失败")
                     # 继续执行，等待下一次检查
                 except asyncio.CancelledError:
                     logger.info(f"录制任务被取消: {recorder.flag}")
@@ -411,7 +481,7 @@ class LiveRecorder:
             session.set_option('http-cookies', self.cookies)
         return session
 
-    def run_record(self, stream: Union[StreamIO, HTTPStream], url, title, format, duration=None, duration_unit=None):
+    def run_record(self, stream: Union[StreamIO, HTTPStream], url, title, format, duration=None, duration_unit=None, timeout_callback=None):
         # 默认使用MP4格式，除非有特殊配置
         output_format = self.format if self.format else 'mp4'
         # 获取输出文件名
@@ -431,13 +501,21 @@ class LiveRecorder:
             output_path = output_dir / filename
             logger.debug(f'{self.flag}输出路径：{output_path}')
 
+            # 初始化变量
+            stream_fd = None
+            prebuffer = None
+            
+            # 打开流并获取prebuffer
+            logger.debug(f'{self.flag}打开流并获取prebuffer')
+            stream_fd, prebuffer = open_stream(stream)
+            
             # 创建输出文件
             logger.debug(f'{self.flag}创建输出文件')
             output = FileOutput(output_path)
             logger.debug(f'{self.flag}输出文件创建成功')
 
             # 记录录制信息
-            recording[url] = (stream, output)
+            recording[url] = (stream_fd, output)
             logger.debug(f'{self.flag}已添加到录制列表，当前录制数量：{len(recording)}')
 
             # 设置录制时长
@@ -455,22 +533,52 @@ class LiveRecorder:
             else:
                 timeout = None
                 logger.debug(f'{self.flag}未设置录制时长，将持续录制')
-
-            # 创建并启动流运行器
-            logger.debug(f'{self.flag}创建StreamRunner')
-            stream_runner = StreamRunner(stream, output)
-            logger.debug(f'{self.flag}开始运行StreamRunner')
-
             # 使用超时控制录制时长
             start_time = time.time()
+            output_opened = False
             try:
+                output.open()
+                output_opened = True
+                logger.debug(f'{self.flag}输出文件已打开')
+                
+                # 创建并启动流运行器
+                logger.debug(f'{self.flag}创建StreamRunner')
+                stream_runner = StreamRunner(stream_fd, output)
+                logger.debug(f'{self.flag}开始运行StreamRunner')
                 if timeout:
                     logger.debug(f'{self.flag}使用超时控制：{timeout}秒')
-                    stream_runner.run(timeout=timeout)
-                    logger.debug(f'{self.flag}录制已达到设定时长，结束录制')
+                    # StreamRunner.run()需要prebuffer参数，需要在外部控制时长
+                    
+                    
+                    def timeout_handler():
+                        logger.debug(f'{self.flag}录制已达到设定时长，准备结束录制')
+                        # 通过关闭流来结束录制，而不是直接关闭输出
+                        try:
+                            if hasattr(stream_fd, 'close') and not stream_fd.closed:
+                                stream_fd.close()
+                        except:
+                            pass
+                        
+                        # 调用回调函数处理GUI状态
+                        if timeout_callback and hasattr(self,'id'):
+                            try:
+                                timeout_callback(self.id)
+                                logger.debug(f'{self.flag}已调用超时回调函数')
+                            except Exception as e:
+                                logger.warning(f'{self.flag}执行超时回调时出错: {e}')
+                    
+                    # 设置定时器
+                    timer = threading.Timer(timeout, timeout_handler)
+                    timer.start()
+                    
+                    try:
+                        stream_runner.run(prebuffer)
+                        logger.debug(f'{self.flag}录制已结束')
+                    finally:
+                        timer.cancel()  # 取消定时器
                 else:
                     logger.debug(f'{self.flag}无超时控制，持续录制')
-                    stream_runner.run()
+                    stream_runner.run(prebuffer)
                     logger.debug(f'{self.flag}录制已结束')
             except KeyboardInterrupt:
                 logger.info(f'{self.flag}录制被用户中断')
@@ -481,19 +589,51 @@ class LiveRecorder:
                 duration = end_time - start_time
                 logger.info(f'{self.flag}录制完成，持续时间：{duration:.2f}秒')
 
+                # 安全关闭资源
+                try:
+                    if output_opened and hasattr(output, 'close') and not getattr(output, 'closed', True):
+                        output.close()
+                        logger.debug(f'{self.flag}输出文件已关闭')
+                except Exception as close_err:
+                    logger.warning(f'{self.flag}关闭输出文件时出错: {close_err}')
+                
+                try:
+                    if hasattr(stream_fd, 'close') and not getattr(stream_fd, 'closed', True):
+                        stream_fd.close()
+                        logger.debug(f'{self.flag}流已关闭')
+                except Exception as close_err:
+                    logger.warning(f'{self.flag}关闭流时出错: {close_err}')
+
                 # 清理资源
                 if url in recording:
                     logger.debug(f'{self.flag}清理录制资源')
                     del recording[url]
                     logger.debug(f'{self.flag}录制资源已清理，当前录制数量：{len(recording)}')
+                
+                # 如果有用户ID，清理用户录制状态（类似stop_user_recording的逻辑）
+                if hasattr(self, 'user_id') and self.user_id:
+                    logger.debug(f'{self.flag}清理用户录制状态: {self.user_id}')
+                    # 这里需要通知GUI更新状态，但由于这是在LiveRecorder中，
+                    # 实际的状态清理应该在GUI层面处理
         except Exception as e:
             logger.error(f'{self.flag}录制失败：{e}', exc_info=True)
             # 确保清理资源
             if url in recording:
                 try:
-                    stream_fd, output = recording[url]
-                    stream_fd.close()
-                    output.close()
+                    # 安全地获取并关闭资源
+                    resources = recording[url]
+                    if isinstance(resources, tuple) and len(resources) == 2:
+                        res_stream_fd, res_output = resources
+                        if res_stream_fd:
+                            try:
+                                res_stream_fd.close()
+                            except Exception as close_err:
+                                logger.warning(f'{self.flag}关闭流时出错: {close_err}')
+                        if res_output:
+                            try:
+                                res_output.close()
+                            except Exception as close_err:
+                                logger.warning(f'{self.flag}关闭输出时出错: {close_err}')
                     del recording[url]
                     logger.debug(f'{self.flag}异常情况下清理录制资源完成')
                 except Exception as cleanup_error:
@@ -606,9 +746,11 @@ class LiveRecorder:
     def stream_writer(self, stream, url, filename):
         logger.info(f'{self.flag}获取到直播流链接：{filename}\n{stream.url}')
         output = FileOutput(Path(f'{self.output}/{filename}'))
+        output_opened = False
         try:
             stream_fd, prebuffer = open_stream(stream)
             output.open()
+            output_opened = True
             recording[url] = (stream_fd, output)
             logger.info(f'{self.flag}正在录制：{filename}')
             StreamRunner(stream_fd, output).run(prebuffer)
@@ -624,7 +766,11 @@ class LiveRecorder:
             else:
                 logger.exception(f'{self.flag}直播录制错误：{filename}\n{error}')
         finally:
-            output.close()
+            if output_opened:
+                try:
+                    output.close()
+                except Exception as close_err:
+                    logger.warning(f'{self.flag}关闭输出文件时出错: {close_err}')
 
     def run_ffmpeg(self, filename, format):
         logger.info(f'{self.flag}开始ffmpeg封装：{filename}')
@@ -646,12 +792,13 @@ class LiveRecorder:
         os.rename(f'{self.output}/{temp_filename}', f'{self.output}/{new_filename}')
 
 class Kwai(LiveRecorder):
-    def __init__(self, config: dict, user: dict):
+    def __init__(self, config: dict, user: dict, gui_timeout_callback=None):
         """初始化快手录制器
 
         Args:
             config (dict): 配置字典
             user (dict): 用户配置
+            gui_timeout_callback (callable, optional): GUI超时回调函数
         """
         super().__init__(config, user)
         self.mState = 0  # 初始化直播状态
@@ -659,6 +806,7 @@ class Kwai(LiveRecorder):
         self.proxy = config['proxy']  # 设置代理
         self.duration = user.get('duration', None)  # 录制时长
         self.duration_unit = user.get('duration_unit', None)  # 时长单位
+        self.gui_timeout_callback = gui_timeout_callback  # 保存GUI回调函数
         self.config_manager = type('ConfigManager', (), {
             'get_global_config': lambda self, key: config.get(key)
         })()  # 创建配置管理器对象
@@ -792,33 +940,50 @@ class Kwai(LiveRecorder):
                     title = self.name.replace(" ", "")  # 使用name作为标题
                     logger.debug(f"{self.flag} 创建HTTPStream")
                     try:
-                        # 添加超时处理
-                        with asyncio.timeout(30):  # 设置30秒超时
+                        # 修复超时处理，使用asyncio.wait_for替代asyncio.timeout
+                        async def create_stream_with_timeout():
                             logger.debug(f"{self.flag} 开始创建HTTPStream对象")
                             stream = HTTPStream(
                                 self.get_streamlink(),
                                 live_url
                             )  # HTTPStream[flv]
                             logger.debug(f"{self.flag} HTTPStream对象创建成功: {stream}")
-                            url = live_url
-                            # 明确指定文件格式为flv，确保正确转换
-                            logger.debug(f"{self.flag} 准备开始录制，格式: flv, 时长: {self.duration} {self.duration_unit}")
+                            return stream
+                        
+                        # 使用asyncio.wait_for设置30秒超时
+                        stream = await asyncio.wait_for(create_stream_with_timeout(), timeout=30.0)
+                        url = live_url
+                        # 明确指定文件格式为flv，确保正确转换
+                        logger.debug(f"{self.flag} 准备开始录制，格式: flv, 时长: {self.duration} {self.duration_unit}")
 
-                            # 使用超时保护的方式调用run_record
-                            try:
-                                logger.debug(f"{self.flag} 开始调用run_record")
-                                await asyncio.to_thread(
-                                    self.run_record,
-                                    stream,
-                                    url,
-                                    title,
-                                    'flv',  # 明确指定输入格式
-                                    self.duration,
-                                    self.duration_unit
-                                )
-                                logger.debug(f"{self.flag} run_record调用完成")
-                            except Exception as e:
-                                logger.error(f"{self.flag} run_record执行失败: {e}", exc_info=True)
+                        # 使用超时保护的方式调用run_record
+                        try:
+                            logger.debug(f"{self.flag} 开始调用run_record")
+                            
+                            # 创建超时回调函数，用于处理GUI状态更新
+                            def timeout_callback(user_id=None):
+                                logger.debug(f"{self.flag} 定时录制结束，准备清理状态")
+                                # 调用GUI传递的回调函数
+                                if self.gui_timeout_callback:
+                                    try:
+                                        self.gui_timeout_callback(self.id)
+                                        logger.debug(f"{self.flag} 已调用GUI超时回调函数")
+                                    except Exception as e:
+                                        logger.warning(f"{self.flag} 调用GUI超时回调时出错: {e}")
+                            
+                            await asyncio.to_thread(
+                                self.run_record,
+                                stream,
+                                url,
+                                title,
+                                'flv',  # 明确指定输入格式
+                                self.duration,
+                                self.duration_unit,
+                                timeout_callback  # 传递超时回调函数
+                            )
+                            logger.debug(f"{self.flag} run_record调用完成")
+                        except Exception as e:
+                            logger.error(f"{self.flag} run_record执行失败: {e}", exc_info=True)
                     except asyncio.TimeoutError:
                         logger.error(f"{self.flag} 创建或运行HTTPStream超时")
                     except Exception as e:

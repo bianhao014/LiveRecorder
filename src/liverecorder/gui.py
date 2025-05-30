@@ -7,6 +7,15 @@ import threading
 import re
 import logging
 from datetime import datetime
+
+# 预先导入可能在子线程中使用的模块，避免在子线程中首次导入
+from .live_recorder import LiveRecorder
+# 预先导入streamlink相关模块，避免在子线程中导入时的signal错误
+import streamlink
+from streamlink_cli.main import open_stream
+from streamlink_cli.output import FileOutput
+from streamlink_cli.streamrunner import StreamRunner
+
 from .config_manager import ConfigManager
 
 # 配置日志
@@ -73,12 +82,105 @@ class LiveRecorderApp(toga.App):
         self._is_exiting = False  # 标记应用是否正在退出
 
     def on_exit(self, widget):
-        # 终止所有录制线程
-        if hasattr(self, 'recorder_threads'):
-            for thread in self.recorder_threads:
-                thread.stop_recording()
-                thread.join(timeout=5)
+        # 标记应用正在退出
+        self._is_exiting = True
+        logger.info("应用正在退出，开始清理资源...")
+        
+        # 终止所有录制器
+        try:
+            # 停止全局录制器
+            if hasattr(self, 'recorder') and self.recorder:
+                logger.debug("停止全局录制器")
+                self.recorder.stop()
+                self.recorder = None
+            
+            # 停止所有用户录制器
+            if hasattr(self, 'user_recorders'):
+                logger.debug(f"停止 {len(self.user_recorders)} 个用户录制器")
+                for user_id, recorder in list(self.user_recorders.items()):
+                    try:
+                        recorder.stop()
+                    except Exception as e:
+                        logger.error(f"停止用户录制器失败: {e}")
+                self.user_recorders.clear()
+            
+            # 清理所有待处理的异步任务
+            try:
+                import asyncio
+                logger.debug("开始清理所有待处理的异步任务")
+                # 获取所有待处理的任务
+                pending_tasks = [task for task in asyncio.all_tasks() if not task.done()]
+                if pending_tasks:
+                    logger.debug(f"发现 {len(pending_tasks)} 个待处理的异步任务")
+                    # 取消所有待处理的任务
+                    for task in pending_tasks:
+                        logger.debug(f"取消异步任务: {task.get_name()}")
+                        task.cancel()
+                    
+                    # 等待任务取消完成
+                    try:
+                        # 创建一个短暂的事件循环来处理任务取消
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # 等待所有任务取消完成，设置较短的超时时间
+                        wait_task = loop.create_task(asyncio.gather(*pending_tasks, return_exceptions=True))
+                        loop.run_until_complete(asyncio.wait_for(wait_task, timeout=3.0))
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        logger.warning("等待异步任务取消超时")
+                    except Exception as e:
+                        logger.error(f"清理异步任务时出错: {e}")
+                    finally:
+                        # 关闭事件循环
+                        loop.close()
+                else:
+                    logger.debug("没有发现待处理的异步任务")
+            except Exception as e:
+                logger.error(f"清理异步任务失败: {e}")
+            
+            # 等待所有录制线程结束
+            if hasattr(self, 'recorder_threads'):
+                logger.debug(f"等待 {len(self.recorder_threads)} 个录制线程结束")
+                for thread in self.recorder_threads:
+                    if thread.is_alive():
+                        logger.debug(f"等待线程结束: {thread.name}")
+                        thread.join(timeout=5)
+                        
+                        # 如果线程仍然活着，使用更激进的方式终止
+                        if thread.is_alive():
+                            logger.warning(f"强制终止线程：{thread.name}")
+                            try:
+                                import ctypes
+                                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                                    ctypes.c_long(thread.ident),
+                                    ctypes.py_object(SystemExit)
+                                )
+                                # 再次等待确保线程已终止
+                                thread.join(timeout=1.0)
+                                if thread.is_alive():
+                                    # 如果仍然活着，尝试最后的强制终止
+                                    logger.warning(f"线程仍然活着，尝试最后的强制终止: {thread.name}")
+                                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                                        ctypes.c_long(thread.ident),
+                                        ctypes.py_object(SystemError)
+                                    )
+                                    thread.join(timeout=1.0)
+                            except Exception as force_error:
+                                logger.error(f"强制终止线程失败: {force_error}")
+                        else:
+                            logger.info(f"成功终止线程：{thread.name}")
+                
+                # 检查是否还有活着的线程
+                alive_threads = [t for t in self.recorder_threads if t.is_alive()]
+                if alive_threads:
+                    logger.warning(f"仍有 {len(alive_threads)} 个线程未能终止")
+                else:
+                    logger.info("所有录制线程已成功终止")
+                        
+        except Exception as e:
+            logger.error(f"退出时清理资源失败: {e}")
 
+        logger.info("资源清理完成，应用退出")
         # 直接返回True允许正常退出
         return True
 
@@ -95,55 +197,8 @@ class LiveRecorderApp(toga.App):
             self.log_output.scroll_to_bottom()
 
     def startup(self):
-        # 确保日志系统正确初始化
-        logger.handlers = []  # 清除所有现有处理器
-        logger.propagate = False  # 防止日志传播到根logger
 
-        # 配置GUI日志处理器
-        gui_handler = GuiLogHandler(self)
-        gui_handler.setLevel(logging.INFO)
-        logger.addHandler(gui_handler)
-        logger.setLevel(logging.INFO)
 
-        # 添加控制台日志处理器用于调试
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
-        logger.addHandler(console_handler)
-
-        # 配置loguru日志拦截器，将loguru日志重定向到标准logging
-        from loguru import logger as loguru_logger
-        import sys
-
-        class InterceptHandler(logging.Handler):
-            def emit(self, record):
-                # 获取对应的loguru级别
-                try:
-                    level = loguru_logger.level(record.levelname).name
-                except ValueError:
-                    level = record.levelno
-
-                # 找到调用者的帧
-                frame, depth = logging.currentframe(), 2
-                while frame.f_code.co_filename == logging.__file__:
-                    frame = frame.f_back
-                    depth += 1
-
-                # 将日志记录转发给loguru
-                loguru_logger.opt(depth=depth, exception=record.exc_info).log(
-                    level, record.getMessage()
-                )
-
-        # 拦截所有来自live_recorder模块的日志
-        logging.getLogger("liverecorder").handlers = [InterceptHandler()]
-
-        # 配置loguru将日志发送到GUI
-        loguru_logger.configure(handlers=[
-            {"sink": lambda msg: self.add_log(msg), "format": "{message}"}
-        ])
-
-        # 测试日志
-        logger.info("GUI日志系统初始化完成")
-        loguru_logger.info("Loguru日志系统已连接到GUI")
 
 
         # 创建主窗口
@@ -323,7 +378,7 @@ class LiveRecorderApp(toga.App):
             headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态', '操作'],
             accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status', 'action'],
             data=[],
-            style=Pack(flex=1, width=1000),
+            style=Pack(flex=1,width=1150,height=500),
             on_select=self.on_user_selected,
             multiple_select=False,
             missing_value=''
@@ -337,7 +392,7 @@ class LiveRecorderApp(toga.App):
 
         # 设置主窗口的内容
         self.main_window.content = option_container
-        self.main_window.size = (800, 600)
+        self.main_window.size = (1200, 800)
 
         # 加载配置并更新显示
         self.update_config_display()
@@ -777,10 +832,9 @@ class LiveRecorderApp(toga.App):
             }
 
             # 使用asyncio.create_task在后台启动录制，避免阻塞GUI
-            task = asyncio.create_task(self._start_user_recording_task(user_id, user_data, config))
+            await asyncio.create_task(self._start_user_recording_task(user_id, user_data, config))
 
             logger.info(f"正在启动用户 {user_data['name']} 的录制...")
-            await self.show_info_message('提示', f"正在启动用户 {user_data['name']} 的录制...")
 
         except Exception as e:
             logger.error(f"启动用户录制失败: {str(e)}", exc_info=True)
@@ -793,8 +847,34 @@ class LiveRecorderApp(toga.App):
             def create_recorder_and_start():
                 """在独立线程中创建录制器并启动录制循环"""
                 try:
-                    from .live_recorder import LiveRecorder
-                    recorder = LiveRecorder(config)
+                    # 创建GUI超时回调函数
+                    def gui_timeout_callback(recorder_user_id):
+                        """处理录制超时时的GUI状态更新"""
+                        logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        # 更新用户录制状态
+                        if recorder_user_id in self.user_recording_status:
+                            self.user_recording_status[recorder_user_id] = False
+                        # 清理录制器引用
+                        if recorder_user_id in self.user_recorders:
+                            del self.user_recorders[recorder_user_id]
+                        # 刷新界面（直接在当前线程中执行，避免使用asyncio）
+                        try:
+                            # 直接调用非异步方法刷新表格
+                            self.refresh_users_table()
+                            
+                            # 如果当前选中的用户录制状态发生变化，更新按钮状态
+                            if self.current_user and self.current_user['id'] == recorder_user_id:
+                                self.start_user_record_button.enabled = True
+                                self.stop_user_record_button.enabled = False
+                            
+                            logger.debug("定时录制结束后UI状态已更新")
+                            stop_user_recording(recorder_user_id)
+                        except Exception as e:
+                            logger.warning(f"刷新UI时出错: {e}")
+                    
+                    # 不再需要导入LiveRecorder，因为已在主线程中导入
+                    # from .live_recorder import LiveRecorder
+                    recorder = LiveRecorder(config, gui_timeout_callback=gui_timeout_callback)
                     run_loop = recorder.start()
 
                     # 保存录制器引用（在主线程中访问需要线程安全）
@@ -810,6 +890,7 @@ class LiveRecorderApp(toga.App):
                     logger.error(f"用户 {user_data['name']} 录制线程执行失败: {str(e)}", exc_info=True)
                 finally:
                     # 清理录制状态
+                    self.user_recording_status[user_id] = False
                     if user_id in self.user_recorders:
                         del self.user_recorders[user_id]
                     if user_id in self.user_recording_status:
@@ -849,8 +930,33 @@ class LiveRecorderApp(toga.App):
             def create_recorder_and_start():
                 """在独立线程中创建录制器并启动录制循环"""
                 try:
-                    from .live_recorder import LiveRecorder
-                    recorder = LiveRecorder(config)
+                    # 创建GUI超时回调函数
+                    def gui_timeout_callback(recorder_user_id):
+                        """处理录制超时时的GUI状态更新"""
+                        logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        # 更新用户录制状态
+                        if recorder_user_id in self.user_recording_status:
+                            self.user_recording_status[recorder_user_id] = False
+                        # 清理录制器引用
+                        if recorder_user_id in self.user_recorders:
+                            del self.user_recorders[recorder_user_id]
+                        # 刷新界面（直接在当前线程中执行，避免使用asyncio）
+                        try:
+                            # 直接调用非异步方法刷新表格
+                            self.refresh_users_table()
+                            
+                            # 如果当前选中的用户录制状态发生变化，更新按钮状态
+                            if self.current_user and self.current_user['id'] == recorder_user_id:
+                                self.start_user_record_button.enabled = True
+                                self.stop_user_record_button.enabled = False
+                            
+                            logger.debug("定时录制结束后UI状态已更新")
+                        except Exception as e:
+                            logger.warning(f"刷新UI时出错: {e}")
+                    
+                    # 不再需要导入LiveRecorder，因为已在主线程中导入
+                    # from .live_recorder import LiveRecorder
+                    recorder = LiveRecorder(config, gui_timeout_callback=gui_timeout_callback)
                     run_loop = recorder.start()
 
                     # 保存录制器引用
@@ -869,6 +975,23 @@ class LiveRecorderApp(toga.App):
                     self.recording = False
                     if hasattr(self, 'recorder'):
                         self.recorder = None
+                    
+                    # 清理所有用户录制状态（类似stop_user_recording的逻辑）
+                    for user_id in list(self.user_recorders.keys()):
+                        recorder = self.user_recorders[user_id]
+                        if recorder:
+                            try:
+                                recorder.stop()
+                            except Exception as e:
+                                logger.warning(f"停止用户录制器时出错: {e}")
+                        del self.user_recorders[user_id]
+                        self.user_recording_status[user_id] = False
+                    
+                    # 更新UI状态
+                    try:
+                        asyncio.create_task(self._async_update_ui_after_recording_stop())
+                    except Exception as e:
+                        logger.warning(f"更新UI状态时出错: {e}")
 
             # 创建并启动录制线程
             record_thread = threading.Thread(
@@ -971,7 +1094,6 @@ class LiveRecorderApp(toga.App):
                 # 创建后台线程来处理录制
                 def record_task():
                     try:
-                        from .live_recorder import LiveRecorder
                         self.recorder = LiveRecorder(live_recorder_config) # 使用处理过的配置
                         run_loop = self.recorder.start()
                         if run_loop:
@@ -980,7 +1102,7 @@ class LiveRecorderApp(toga.App):
                     except Exception as e:
                         logger.error(f"录制线程执行失败: {str(e)}", exc_info=True)
                         # 使用主线程安全的方式更新UI
-                        self.main_window.add_background_task(self._handle_recording_error)
+                        asyncio.create_task(self._async_handle_recording_error())
 
                 # 启动录制线程
                 record_thread = threading.Thread(
@@ -1024,7 +1146,7 @@ class LiveRecorderApp(toga.App):
                     self.recorder_threads = [t for t in self.recorder_threads if t.is_alive()]
                     logger.debug(f"剩余活动线程数: {len(self.recorder_threads)}")
                     # 在主线程中刷新表格
-                    self.main_window.add_background_task(self.refresh_users_table)
+                    asyncio.create_task(self._async_refresh_users_table())
 
                 cleanup_thread = threading.Thread(
                     target=cleanup_threads,
@@ -1032,6 +1154,9 @@ class LiveRecorderApp(toga.App):
                     name="cleanup_thread"
                 )
                 cleanup_thread.start()
+                
+                # 将清理线程也添加到recorder_threads列表中，确保在退出时能够正确终止
+                self.recorder_threads.append(cleanup_thread)
 
                 logger.info("录制已停止")
 
@@ -1057,6 +1182,47 @@ class LiveRecorderApp(toga.App):
             '错误',
             '录制过程发生错误，已停止录制'
         )
+
+    async def _async_handle_recording_error(self):
+        """异步处理录制错误的包装器"""
+        self._handle_recording_error()
+
+    async def _async_refresh_users_table(self):
+        """异步刷新用户表格的包装器"""
+        self.refresh_users_table()
+        
+    async def _async_update_ui_after_recording_stop(self):
+        """异步更新UI状态（在录制停止后）"""
+        # 更新按钮状态
+        self.record_button.text = "开始全部录制"
+        self.record_button.enabled = True
+        del self.record_button.style.color
+        
+        # 刷新用户表格
+        self.refresh_users_table()
+        
+        # 显示通知
+        await self.show_info_message('成功', "录制已停止")
+    
+    async def _async_refresh_ui_after_timeout(self):
+        """定时录制结束后异步刷新UI状态"""
+        try:
+            # 刷新用户表格
+            self.refresh_users_table()
+            
+            # 如果当前选中的用户录制状态发生变化，更新按钮状态
+            if self.current_user:
+                user_id = self.current_user['id']
+                is_recording = self.user_recording_status.get(user_id, False)
+                self.start_user_record_button.enabled = not is_recording
+                self.stop_user_record_button.enabled = is_recording
+            
+            # 显示通知
+            await self.show_info_message('提示', '定时录制已结束')
+            
+            logger.debug("定时录制结束后UI状态已更新")
+        except Exception as e:
+            logger.error(f"刷新UI状态时出错: {e}", exc_info=True)
 
     def validate_recording_conditions(self):
         """验证录制条件"""
