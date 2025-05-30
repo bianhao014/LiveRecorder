@@ -850,28 +850,35 @@ class LiveRecorderApp(toga.App):
                     # 创建GUI超时回调函数
                     def gui_timeout_callback(recorder_user_id):
                         """处理录制超时时的GUI状态更新"""
-                        logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
-                        # 先停止录制器
-                        if recorder_user_id in self.user_recorders:
-                            try:
-                                # 确保录制器正确停止
-                                recorder = self.user_recorders[recorder_user_id]
-                                if recorder:
-                                    logger.debug(f"停止用户 {recorder_user_id} 的录制器")
-                                    recorder.stop()
-                                    # 等待一小段时间确保资源释放
-                                    import time
-                                    time.sleep(0.5)
-                            except Exception as e:
-                                logger.error(f"停止录制器时出错: {e}")
+                        logger.debug(f"全局录制中用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        try:
+                            # 对于全局录制，需要停止全局录制器
+                            if hasattr(self, 'recorder') and self.recorder:
+                                logger.debug(f"停止全局录制器")
+                                self.recorder.stop()
+                                # 等待一小段时间确保资源释放
+                                import time
+                                time.sleep(0.5)
+                                # 清理全局录制器引用
+                                self.recorder = None
+                                # 更新录制状态
+                                self.recording = False
+                                
+                                # 更新UI状态（在主线程中执行）
+                                try:
+                                    # 更新按钮状态
+                                    self.record_button.text = "开始全部录制"
+                                    self.record_button.enabled = True
+                                    if hasattr(self.record_button.style, 'color'):
+                                        del self.record_button.style.color
+                                except Exception as e:
+                                    logger.warning(f"更新按钮状态时出错: {e}")
+                        except Exception as e:
+                            logger.error(f"停止全局录制器时出错: {e}")
                         
                         # 更新用户录制状态
                         if recorder_user_id in self.user_recording_status:
                             self.user_recording_status[recorder_user_id] = False
-                        
-                        # 清理录制器引用
-                        if recorder_user_id in self.user_recorders:
-                            del self.user_recorders[recorder_user_id]
                         
                         # 刷新界面（直接在当前线程中执行，避免使用asyncio）
                         try:
@@ -948,28 +955,35 @@ class LiveRecorderApp(toga.App):
                     # 创建GUI超时回调函数
                     def gui_timeout_callback(recorder_user_id):
                         """处理录制超时时的GUI状态更新"""
-                        logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
-                        # 先停止录制器
-                        if recorder_user_id in self.user_recorders:
-                            try:
-                                # 确保录制器正确停止
-                                recorder = self.user_recorders[recorder_user_id]
-                                if recorder:
-                                    logger.debug(f"停止用户 {recorder_user_id} 的录制器")
-                                    recorder.stop()
-                                    # 等待一小段时间确保资源释放
-                                    import time
-                                    time.sleep(0.5)
-                            except Exception as e:
-                                logger.error(f"停止录制器时出错: {e}")
+                        logger.debug(f"全局录制中用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        try:
+                            # 对于全局录制，需要停止全局录制器
+                            if hasattr(self, 'recorder') and self.recorder:
+                                logger.debug(f"停止全局录制器")
+                                self.recorder.stop()
+                                # 等待一小段时间确保资源释放
+                                import time
+                                time.sleep(0.5)
+                                # 清理全局录制器引用
+                                self.recorder = None
+                                # 更新录制状态
+                                self.recording = False
+                                
+                                # 更新UI状态（在主线程中执行）
+                                try:
+                                    # 更新按钮状态
+                                    self.record_button.text = "开始全部录制"
+                                    self.record_button.enabled = True
+                                    if hasattr(self.record_button.style, 'color'):
+                                        del self.record_button.style.color
+                                except Exception as e:
+                                    logger.warning(f"更新按钮状态时出错: {e}")
+                        except Exception as e:
+                            logger.error(f"停止全局录制器时出错: {e}")
                         
                         # 更新用户录制状态
                         if recorder_user_id in self.user_recording_status:
                             self.user_recording_status[recorder_user_id] = False
-                        
-                        # 清理录制器引用
-                        if recorder_user_id in self.user_recorders:
-                            del self.user_recorders[recorder_user_id]
                         
                         # 刷新界面（直接在当前线程中执行，避免使用asyncio）
                         try:

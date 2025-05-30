@@ -254,7 +254,7 @@ class LiveRecorder:
         logger.debug("开始停止录制")
         self.running = False
 
-        # 取消所有任务 - 使用线程安全的方式
+        # 取消所有任务 - 使用简化的线程安全方式
         if self.tasks:
             logger.debug(f"取消 {len(self.tasks)} 个录制任务")
             if hasattr(self, 'loop') and self.loop and self.loop.is_running():
@@ -267,61 +267,13 @@ class LiveRecorder:
                 
                 self.loop.call_soon_threadsafe(cancel_tasks)
                 
-                # 等待任务完成清理（在主线程中等待）
+                # 简单等待，避免复杂的事件循环操作
                 import time
-                import asyncio
-                start_time = time.time()
-                pending_tasks = []
+                time.sleep(0.2)  # 给事件循环时间处理取消请求
                 
-                # 确保事件循环能够处理取消请求
-                try:
-                    # 创建一个新的事件循环来处理任务取消
-                    temp_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(temp_loop)
-                    
-                    # 复制任务列表，以便在新的事件循环中处理
-                    tasks_to_cancel = [task for task in self.tasks if not task.done()]
-                    
-                    if tasks_to_cancel:
-                        logger.debug(f"使用临时事件循环处理 {len(tasks_to_cancel)} 个任务的取消")
-                        # 创建一个Future来等待任务取消
-                        done_future = asyncio.Future(loop=temp_loop)
-                        
-                        # 监控任务状态的回调
-                        def check_tasks_done():
-                            if all(task.done() for task in tasks_to_cancel):
-                                if not done_future.done():
-                                    done_future.set_result(True)
-                            else:
-                                # 继续检查
-                                temp_loop.call_later(0.1, check_tasks_done)
-                        
-                        # 开始检查
-                        temp_loop.call_soon(check_tasks_done)
-                        
-                        # 等待所有任务完成或超时（减少超时时间，避免GUI假死）
-                        try:
-                            temp_loop.run_until_complete(asyncio.wait_for(done_future, timeout=1.0))
-                            logger.debug("所有任务已在临时事件循环中完成清理")
-                        except asyncio.TimeoutError:
-                            logger.warning("等待任务取消超时，强制继续执行")
-                except Exception as e:
-                    logger.error(f"使用临时事件循环处理任务取消时出错: {e}")
-                finally:
-                    # 关闭临时事件循环
-                    try:
-                        temp_loop.close()
-                    except Exception as e:
-                        logger.error(f"关闭临时事件循环时出错: {e}")
-                
-                # 再次检查主线程中的任务状态
-                pending_tasks = [task for task in self.tasks if not task.done()]
-                if pending_tasks:
-                    logger.warning(f"仍有 {len(pending_tasks)} 个任务未完成清理，强制继续")
-                else:
-                    logger.debug("所有任务已完成清理")
-                
+                # 清空任务列表
                 self.tasks = []
+                logger.debug("任务取消请求已发送，继续执行")
             else:
                 # 如果事件循环不在运行，直接清空任务列表
                 self.tasks = []
