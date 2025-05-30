@@ -378,7 +378,7 @@ class LiveRecorderApp(toga.App):
             headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态', '操作'],
             accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status', 'action'],
             data=[],
-            style=Pack(flex=1,width=1150,height=500),
+            style=Pack(flex=1,width=1150,height=300),
             on_select=self.on_user_selected,
             multiple_select=False,
             missing_value=''
@@ -851,12 +851,28 @@ class LiveRecorderApp(toga.App):
                     def gui_timeout_callback(recorder_user_id):
                         """处理录制超时时的GUI状态更新"""
                         logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        # 先停止录制器
+                        if recorder_user_id in self.user_recorders:
+                            try:
+                                # 确保录制器正确停止
+                                recorder = self.user_recorders[recorder_user_id]
+                                if recorder:
+                                    logger.debug(f"停止用户 {recorder_user_id} 的录制器")
+                                    recorder.stop()
+                                    # 等待一小段时间确保资源释放
+                                    import time
+                                    time.sleep(0.5)
+                            except Exception as e:
+                                logger.error(f"停止录制器时出错: {e}")
+                        
                         # 更新用户录制状态
                         if recorder_user_id in self.user_recording_status:
                             self.user_recording_status[recorder_user_id] = False
+                        
                         # 清理录制器引用
                         if recorder_user_id in self.user_recorders:
                             del self.user_recorders[recorder_user_id]
+                        
                         # 刷新界面（直接在当前线程中执行，避免使用asyncio）
                         try:
                             # 直接调用非异步方法刷新表格
@@ -868,7 +884,6 @@ class LiveRecorderApp(toga.App):
                                 self.stop_user_record_button.enabled = False
                             
                             logger.debug("定时录制结束后UI状态已更新")
-                            stop_user_recording(recorder_user_id)
                         except Exception as e:
                             logger.warning(f"刷新UI时出错: {e}")
                     
@@ -934,12 +949,28 @@ class LiveRecorderApp(toga.App):
                     def gui_timeout_callback(recorder_user_id):
                         """处理录制超时时的GUI状态更新"""
                         logger.debug(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+                        # 先停止录制器
+                        if recorder_user_id in self.user_recorders:
+                            try:
+                                # 确保录制器正确停止
+                                recorder = self.user_recorders[recorder_user_id]
+                                if recorder:
+                                    logger.debug(f"停止用户 {recorder_user_id} 的录制器")
+                                    recorder.stop()
+                                    # 等待一小段时间确保资源释放
+                                    import time
+                                    time.sleep(0.5)
+                            except Exception as e:
+                                logger.error(f"停止录制器时出错: {e}")
+                        
                         # 更新用户录制状态
                         if recorder_user_id in self.user_recording_status:
                             self.user_recording_status[recorder_user_id] = False
+                        
                         # 清理录制器引用
                         if recorder_user_id in self.user_recorders:
                             del self.user_recorders[recorder_user_id]
+                        
                         # 刷新界面（直接在当前线程中执行，避免使用asyncio）
                         try:
                             # 直接调用非异步方法刷新表格
@@ -1026,9 +1057,27 @@ class LiveRecorderApp(toga.App):
         try:
             recorder = self.user_recorders.get(user_id)
             if recorder:
-                recorder.stop()
+                # 在后台线程中停止录制器，避免阻塞GUI
+                def stop_recorder_thread():
+                    try:
+                        logger.debug(f"在后台线程中停止用户 {user_id} 的录制器")
+                        recorder.stop()
+                        logger.debug(f"用户 {user_id} 的录制器已停止")
+                    except Exception as e:
+                        logger.error(f"停止录制器线程中出错: {e}")
+                
+                # 创建并启动停止线程
+                stop_thread = threading.Thread(
+                    target=stop_recorder_thread,
+                    daemon=True,
+                    name=f"stop_recording_user_{user_id}"
+                )
+                stop_thread.start()
+                
+                # 立即从字典中删除录制器引用，避免重复停止
                 del self.user_recorders[user_id]
 
+            # 立即更新录制状态，不等待线程完成
             self.user_recording_status[user_id] = False
 
             user_data = self.config_manager.get_user_by_id(user_id)

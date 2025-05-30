@@ -299,12 +299,12 @@ class LiveRecorder:
                         # 开始检查
                         temp_loop.call_soon(check_tasks_done)
                         
-                        # 等待所有任务完成或超时
+                        # 等待所有任务完成或超时（减少超时时间，避免GUI假死）
                         try:
-                            temp_loop.run_until_complete(asyncio.wait_for(done_future, timeout=3.0))
+                            temp_loop.run_until_complete(asyncio.wait_for(done_future, timeout=1.0))
                             logger.debug("所有任务已在临时事件循环中完成清理")
                         except asyncio.TimeoutError:
-                            logger.warning("等待任务取消超时")
+                            logger.warning("等待任务取消超时，强制继续执行")
                 except Exception as e:
                     logger.error(f"使用临时事件循环处理任务取消时出错: {e}")
                 finally:
