@@ -2,6 +2,7 @@ import sqlite3
 import os
 from pathlib import Path
 from typing import Dict, List, Any, Callable
+from .logger_config import get_logger
 
 class ConfigManager:
     """配置管理器，使用SQLite存储配置"""
@@ -15,7 +16,9 @@ class ConfigManager:
         self.db_path = os.path.join(self.config_dir, 'config.db')
         self.conn = sqlite3.connect(self.db_path)
         self.observers: List[Callable[[str, Any], None]] = []  # 在构造方法中初始化
+        self.logger = get_logger()
         self._ensure_db()
+        self._ensure_default_configs()
 
     
     def _ensure_db(self):
@@ -39,6 +42,12 @@ class ConfigManager:
             )
         ''')
         self.conn.commit()
+    
+    def _ensure_default_configs(self):
+        """确保默认配置存在"""
+        # 设置默认日志级别
+        if not self.get_global_config('log_level'):
+            self.set_global_config('log_level', 'INFO')
            
 
     def add_observer(self, observer: Callable[[str, Any], None]):
@@ -93,7 +102,7 @@ class ConfigManager:
                 }
             return None
         except sqlite3.Error as e:
-            print(f"数据库查询错误: {e}")
+            self.logger.error(f"数据库查询错误: {e}")
             return None
 
     def get_global_config(self, key: str, default: str = '') -> str:
