@@ -123,11 +123,12 @@ class LiveRecorder:
             logger.exception("添加用户监控失败")
             raise e
 
-    def stop_user(self, user_id: int):
+    def stop_user(self, user_id: int, force=False):
         """停止指定用户的录制
 
         Args:
             user_id (int): 用户ID
+            force (bool): 是否强制停止，强制停止会立即终止所有相关任务和线程
         """
         if not self.running:
             logger.warning("录制器未运行")
@@ -140,19 +141,69 @@ class LiveRecorder:
                 # 检查任务是否对应指定用户
                 if hasattr(task, '_recorder') and hasattr(task._recorder, 'id'):
                     if task._recorder.id == user_id:
-                        logger.info(f"取消用户 {user_id} 的录制任务")
-                        task.cancel()
+                        logger.info(f"{'强制' if force else ''}取消用户 {user_id} 的录制任务")
                         tasks_to_remove.append(task)
 
-            # 从任务列表中移除已取消的任务
-            for task in tasks_to_remove:
-                self.tasks.remove(task)
-
-            logger.info(f"成功停止用户 {user_id} 的录制")
+            # 使用线程安全的方式取消任务
+            if tasks_to_remove and hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                def cancel_user_tasks():
+                    for task in tasks_to_remove:
+                        if not task.done():
+                            logger.debug(f"{'强制' if force else ''}取消用户 {user_id} 的任务: {task}")
+                            if force:
+                                # 强制模式：立即取消任务，不等待清理
+                                task.cancel()
+                                # 强制设置任务为完成状态
+                                if hasattr(task, '_recorder'):
+                                    recorder = task._recorder
+                                    # 强制停止录制器的运行状态
+                                    if hasattr(recorder, 'running'):
+                                        recorder.running = False
+                                    # 如果有HTTPStream，强制关闭
+                                    if hasattr(recorder, 'stream') and recorder.stream:
+                                        try:
+                                            recorder.stream.close()
+                                        except:
+                                            pass
+                            else:
+                                # 正常模式：优雅取消
+                                task.cancel()
+                    
+                    # 从任务列表中移除已取消的任务
+                    for task in tasks_to_remove:
+                        if task in self.tasks:
+                            self.tasks.remove(task)
+                
+                # 在事件循环中安全地取消任务
+                self.loop.call_soon_threadsafe(cancel_user_tasks)
+                
+                if force:
+                    # 强制模式：等待一小段时间后强制清理
+                    import threading
+                    import time
+                    
+                    def force_cleanup():
+                        time.sleep(1)  # 等待1秒让取消操作生效
+                        # 强制清理任何残留的线程
+                        import threading
+                        for thread in threading.enumerate():
+                            if thread.name.startswith(f'gui_callback_{user_id}'):
+                                logger.warning(f"发现残留的GUI回调线程: {thread.name}，尝试强制终止")
+                                # 注意：Python中无法强制终止线程，只能标记为daemon让其自动退出
+                    
+                    threading.Thread(target=force_cleanup, daemon=True).start()
+                    logger.warning(f"强制停止用户 {user_id} 的录制，可能存在资源未完全清理")
+                else:
+                    logger.info(f"成功停止用户 {user_id} 的录制")
+            else:
+                logger.warning(f"无法停止用户 {user_id} 的录制：事件循环未运行或无任务")
 
         except Exception as e:
             logger.exception(f"停止用户 {user_id} 录制失败")
-            raise e
+            if force:
+                logger.warning(f"强制模式下忽略停止错误，继续执行清理")
+            else:
+                raise e
 
     def _init_recorder(self, user: dict):
         """初始化单个录制实例的配置
@@ -238,6 +289,11 @@ class LiveRecorder:
                 logger.error(f"run_loop函数执行出错: {str(e)}", exc_info=True)
             finally:
                 logger.debug("run_loop函数执行完毕")
+                # 确保事件循环被正确关闭
+                if hasattr(self, 'loop') and self.loop and not self.loop.is_closed():
+                    logger.debug("在finally块中关闭事件循环")
+                    self.loop.close()
+                    logger.debug("事件循环已在finally块中关闭")
 
         logger.debug("返回run_loop函数")
         return run_loop  # 返回函数而不是直接执行
@@ -267,9 +323,9 @@ class LiveRecorder:
                 
                 self.loop.call_soon_threadsafe(cancel_tasks)
                 
-                # 简单等待，避免复杂的事件循环操作
+                # 减少等待时间，避免阻塞
                 import time
-                time.sleep(0.2)  # 给事件循环时间处理取消请求
+                time.sleep(0.05)  # 减少等待时间
                 
                 # 清空任务列表
                 self.tasks = []
@@ -287,11 +343,34 @@ class LiveRecorder:
             except Exception as e:
                 logger.warning(f"关闭流时出错: {e}")
 
-        # 停止事件循环
+        # 停止事件循环 - 使用非阻塞方式
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             logger.debug("停止事件循环")
             self.loop.call_soon_threadsafe(self.loop.stop)
             logger.debug("事件循环停止信号已发送")
+            
+            # 在单独的线程中关闭事件循环，避免阻塞主线程
+            def close_loop_thread():
+                try:
+                    # 短暂等待事件循环停止
+                    import time
+                    time.sleep(0.05)  # 减少等待时间
+                    
+                    # 关闭事件循环以避免ResourceWarning
+                    if hasattr(self, 'loop') and self.loop and not self.loop.is_closed():
+                        logger.debug("关闭事件循环")
+                        self.loop.close()
+                        logger.debug("事件循环已关闭")
+                except Exception as e:
+                    logger.error(f"关闭事件循环时出错: {e}")
+            
+            # 启动后台线程关闭事件循环
+            import threading
+            threading.Thread(
+                target=close_loop_thread,
+                daemon=True,
+                name="close_event_loop"
+            ).start()
 
         logger.debug("录制已完全停止")
 
@@ -325,6 +404,13 @@ class LiveRecorder:
                         timeout=300  # 增加超时时间到5分钟，给录制更多时间
                     )
                     logger.debug(f"录制器run方法执行完成: {recorder.flag}")
+                    
+                    # 检查是否是定时录制，如果是则录制完成后退出循环
+                    if hasattr(recorder, 'duration') and recorder.duration:
+                        logger.debug(f"定时录制完成: {recorder.flag}，退出录制循环")
+                        task_running = False
+                        break
+                        
                 except asyncio.TimeoutError:
                     logger.error(f"录制器run方法执行超时(300秒): {recorder.flag}，可能是网络问题或直播源获取失败")
                     # 继续执行，等待下一次检查
@@ -335,15 +421,17 @@ class LiveRecorder:
                 except Exception as run_error:
                     logger.error(f"录制器run方法执行出错: {recorder.flag}, 错误: {run_error}", exc_info=True)
 
-                logger.debug(f"录制执行完成，等待间隔: {recorder.interval}秒")
-                # 等待指定的间隔时间
-                for i in range(recorder.interval):
-                    if not self.running or not task_running:
-                        logger.debug(f"录制已停止，退出等待循环: {recorder.flag}")
-                        break
-                    if i % 10 == 0:  # 每10秒记录一次日志
-                        logger.debug(f"等待中: {recorder.flag}, 已等待{i}秒, 总计{recorder.interval}秒")
-                    await asyncio.sleep(1)  # 每秒检查一次是否需要停止
+                # 只有在非定时录制或录制失败时才等待间隔
+                if task_running:
+                    logger.debug(f"录制执行完成，等待间隔: {recorder.interval}秒")
+                    # 等待指定的间隔时间
+                    for i in range(recorder.interval):
+                        if not self.running or not task_running:
+                            logger.debug(f"录制已停止，退出等待循环: {recorder.flag}")
+                            break
+                        if i % 10 == 0:  # 每10秒记录一次日志
+                            logger.debug(f"等待中: {recorder.flag}, 已等待{i}秒, 总计{recorder.interval}秒")
+                        await asyncio.sleep(1)  # 每秒检查一次是否需要停止
             except asyncio.CancelledError:
                 logger.info(f"录制任务被取消: {recorder.flag}")
                 task_running = False
@@ -353,6 +441,29 @@ class LiveRecorder:
                 # 添加短暂休眠，避免因持续错误导致CPU占用过高
                 await asyncio.sleep(5)
         logger.debug(f"录制任务结束: {recorder.flag}")
+        
+        # 更新GUI中相关用户的录制状态，并刷新界面
+        if hasattr(recorder, 'gui_timeout_callback') and recorder.gui_timeout_callback and hasattr(recorder, 'id'):
+            try:
+                logger.debug(f"调用GUI回调函数更新用户状态: {recorder.id}")
+                # 在单独的线程中调用GUI回调，避免阻塞事件循环
+                import threading
+                def call_gui_callback():
+                    try:
+                        recorder.gui_timeout_callback(recorder.id)
+                        logger.debug(f"GUI状态更新完成: {recorder.id}")
+                    except Exception as e:
+                        logger.error(f"GUI回调执行出错: {e}", exc_info=True)
+                
+                threading.Thread(
+                    target=call_gui_callback,
+                    daemon=True,
+                    name=f"gui_callback_{recorder.id}"
+                ).start()
+            except Exception as gui_error:
+                logger.error(f"启动GUI回调线程时出错: {gui_error}", exc_info=True)
+        
+
 
     async def run(self):
         pass
@@ -433,6 +544,99 @@ class LiveRecorder:
             session.set_option('http-cookies', self.cookies)
         return session
 
+    def _run_stream_with_interrupt_check(self, stream_runner, prebuffer, timeout_seconds=None):
+        """可中断的流录制方法
+        
+        Args:
+            stream_runner: StreamRunner实例
+            prebuffer: 预缓冲数据
+            timeout_seconds: 超时时间（秒），None表示无限制
+        """
+        import threading
+        import time
+        
+        logger.debug(f'{self.flag}开始可中断录制方法，当前running状态: {self.running}, 超时设置: {timeout_seconds}秒')
+        
+        # 创建一个标志来控制录制是否应该停止
+        stop_flag = threading.Event()
+        exception_holder = [None]  # 用于存储异常
+        timeout_reached = [False]  # 用于标记是否达到超时
+        
+        def run_stream():
+            try:
+                logger.debug(f'{self.flag}录制线程开始执行stream_runner.run')
+                stream_runner.run(prebuffer)
+                logger.debug(f'{self.flag}录制线程stream_runner.run执行完成')
+            except Exception as e:
+                logger.error(f'{self.flag}录制线程执行出错: {e}', exc_info=True)
+                exception_holder[0] = e
+            finally:
+                logger.debug(f'{self.flag}录制线程结束，设置stop_flag')
+                stop_flag.set()
+        
+        # 在单独的线程中运行录制
+        stream_thread = threading.Thread(target=run_stream, daemon=True)
+        stream_thread.start()
+        logger.debug(f'{self.flag}录制线程已启动')
+        
+        # 记录开始时间
+        start_time = time.time()
+        
+        # 主线程定期检查是否应该停止
+        check_count = 0
+        while not stop_flag.is_set():
+            check_count += 1
+            # 每10次检查输出一次状态日志，避免日志过多
+            if check_count % 10 == 1:
+                logger.debug(f'{self.flag}状态检查 #{check_count}: running={self.running}, stop_flag={stop_flag.is_set()}, 已运行时间={time.time() - start_time:.2f}秒')
+            
+            # 检查录制器是否应该停止
+            if not self.running:
+                logger.debug(f'{self.flag}检测到停止信号，准备中断录制')
+                # 尝试关闭流来中断录制
+                try:
+                    if hasattr(stream_runner, 'stream') and hasattr(stream_runner.stream, 'close'):
+                        stream_runner.stream.close()
+                    elif hasattr(stream_runner, 'fd') and hasattr(stream_runner.fd, 'close'):
+                        stream_runner.fd.close()
+                except Exception as e:
+                    logger.debug(f'{self.flag}关闭流时出错: {e}')
+                break
+            
+            # 检查是否达到超时时间
+            if timeout_seconds and (time.time() - start_time) >= timeout_seconds:
+                logger.debug(f'{self.flag}录制达到设定时长({timeout_seconds}秒)，准备停止')
+                timeout_reached[0] = True
+                # 尝试关闭流来结束录制
+                try:
+                    if hasattr(stream_runner, 'stream') and hasattr(stream_runner.stream, 'close'):
+                        stream_runner.stream.close()
+                    elif hasattr(stream_runner, 'fd') and hasattr(stream_runner.fd, 'close'):
+                        stream_runner.fd.close()
+                except Exception as e:
+                    logger.debug(f'{self.flag}关闭流时出错: {e}')
+                break
+            
+            # 短暂等待，避免过度占用CPU
+            time.sleep(0.1)
+        
+        logger.debug(f'{self.flag}退出主检查循环，等待录制线程结束')
+        # 等待录制线程结束（最多等待5秒）
+        stream_thread.join(timeout=5.0)
+        
+        if stream_thread.is_alive():
+            logger.warning(f'{self.flag}录制线程在5秒后仍未结束')
+        else:
+            logger.debug(f'{self.flag}录制线程已正常结束')
+        
+        # 如果有异常，重新抛出
+        if exception_holder[0]:
+            logger.error(f'{self.flag}录制过程中发生异常，准备重新抛出: {exception_holder[0]}')
+            raise exception_holder[0]
+        
+        logger.debug(f'{self.flag}可中断录制方法执行完成，超时达到: {timeout_reached[0]}')
+        return timeout_reached[0]  # 返回是否因超时而结束
+
     def run_record(self, stream: Union[StreamIO, HTTPStream], url, title, format, duration=None, duration_unit=None, timeout_callback=None):
         # 默认使用MP4格式，除非有特殊配置
         output_format = self.format if self.format else 'mp4'
@@ -497,41 +701,18 @@ class LiveRecorder:
                 logger.debug(f'{self.flag}创建StreamRunner')
                 stream_runner = StreamRunner(stream_fd, output)
                 logger.debug(f'{self.flag}开始运行StreamRunner')
-                if timeout:
-                    logger.debug(f'{self.flag}使用超时控制：{timeout}秒')
-                    # StreamRunner.run()需要prebuffer参数，需要在外部控制时长
-                    
-                    
-                    def timeout_handler():
-                        logger.debug(f'{self.flag}录制已达到设定时长，准备结束录制')
-                        # 通过关闭流来结束录制，而不是直接关闭输出
-                        try:
-                            if hasattr(stream_fd, 'close') and not stream_fd.closed:
-                                stream_fd.close()
-                        except:
-                            pass
-                        
-                        # 调用回调函数处理GUI状态
-                        if timeout_callback and hasattr(self,'id'):
-                            try:
-                                timeout_callback(self.id)
-                                logger.debug(f'{self.flag}已调用超时回调函数')
-                            except Exception as e:
-                                logger.warning(f'{self.flag}执行超时回调时出错: {e}')
-                    
-                    # 设置定时器
-                    timer = threading.Timer(timeout, timeout_handler)
-                    timer.start()
-                    
+                # 使用可中断的方式运行录制，集成超时控制
+                logger.debug(f'{self.flag}开始录制，超时设置: {timeout}秒' if timeout else f'{self.flag}开始录制，无超时限制')
+                timeout_reached = self._run_stream_with_interrupt_check(stream_runner, prebuffer, timeout)
+                logger.debug(f'{self.flag}录制已结束，是否因超时结束: {timeout_reached}')
+                
+                # 如果是因为超时结束，调用回调函数
+                if timeout_reached and timeout_callback and hasattr(self, 'id'):
                     try:
-                        stream_runner.run(prebuffer)
-                        logger.debug(f'{self.flag}录制已结束')
-                    finally:
-                        timer.cancel()  # 取消定时器
-                else:
-                    logger.debug(f'{self.flag}无超时控制，持续录制')
-                    stream_runner.run(prebuffer)
-                    logger.debug(f'{self.flag}录制已结束')
+                        timeout_callback(self.id)
+                        logger.debug(f'{self.flag}已调用超时回调函数')
+                    except Exception as e:
+                        logger.warning(f'{self.flag}执行超时回调时出错: {e}')
             except KeyboardInterrupt:
                 logger.info(f'{self.flag}录制被用户中断')
             except Exception as e:
@@ -565,8 +746,25 @@ class LiveRecorder:
                 # 如果有用户ID，清理用户录制状态（类似stop_user_recording的逻辑）
                 if hasattr(self, 'user_id') and self.user_id:
                     logger.debug(f'{self.flag}清理用户录制状态: {self.user_id}')
-                    # 这里需要通知GUI更新状态，但由于这是在LiveRecorder中，
-                    # 实际的状态清理应该在GUI层面处理
+                    # 通知GUI更新状态
+                    if self.gui_timeout_callback:
+                        try:
+                            # 在单独的线程中调用GUI回调，避免阻塞事件循环
+                            import threading
+                            def call_gui_callback():
+                                try:
+                                    self.gui_timeout_callback(self.user_id)
+                                    logger.debug(f'{self.flag}已调用GUI回调函数更新用户状态')
+                                except Exception as e:
+                                    logger.warning(f'{self.flag}GUI回调执行出错: {e}')
+                            
+                            threading.Thread(
+                                target=call_gui_callback,
+                                daemon=True,
+                                name=f"gui_callback_{self.user_id}"
+                            ).start()
+                        except Exception as e:
+                            logger.warning(f'{self.flag}启动GUI回调线程时出错: {e}')
         except Exception as e:
             logger.error(f'{self.flag}录制失败：{e}', exc_info=True)
             # 确保清理资源
@@ -762,6 +960,10 @@ class Kwai(LiveRecorder):
         self.config_manager = type('ConfigManager', (), {
             'get_global_config': lambda self, key: config.get(key)
         })()  # 创建配置管理器对象
+        
+        # 录制实例应该在创建时就是运行状态
+        self.running = True
+        logger.debug(f'{self.flag}录制实例创建完成，设置running状态为True')
 
     async def create_signature(self, query_str: str, post_dict: dict) -> str:
         # 解析 query_str 为字典
@@ -851,8 +1053,16 @@ class Kwai(LiveRecorder):
                         'https': proxy_config
                     }
 
-            resp = requests.post(url + query, data=data, headers=headers,
-                               proxies=use_proxies, verify=False, timeout=10)
+            # 使用asyncio.to_thread将同步请求转为异步，避免阻塞事件循环
+            resp = await asyncio.to_thread(
+                requests.post,
+                url + query,
+                data=data,
+                headers=headers,
+                proxies=use_proxies,
+                verify=False,
+                timeout=10
+            )
         resp.raise_for_status()
 
         response_json = resp.json()
@@ -904,6 +1114,8 @@ class Kwai(LiveRecorder):
                         
                         # 使用asyncio.wait_for设置30秒超时
                         stream = await asyncio.wait_for(create_stream_with_timeout(), timeout=30.0)
+                        # 保存stream引用，以便在强制停止时能够关闭
+                        self.stream = stream
                         url = live_url
                         # 明确指定文件格式为flv，确保正确转换
                         logger.debug(f"{self.flag} 准备开始录制，格式: flv, 时长: {self.duration} {self.duration_unit}")
@@ -918,10 +1130,22 @@ class Kwai(LiveRecorder):
                                 # 调用GUI传递的回调函数
                                 if self.gui_timeout_callback:
                                     try:
-                                        self.gui_timeout_callback(self.id)
-                                        logger.debug(f"{self.flag} 已调用GUI超时回调函数")
+                                        # 在单独的线程中调用GUI回调，避免阻塞事件循环
+                                        import threading
+                                        def call_gui_callback():
+                                            try:
+                                                self.gui_timeout_callback(self.id)
+                                                logger.debug(f"{self.flag} 已调用GUI超时回调函数")
+                                            except Exception as e:
+                                                logger.warning(f"{self.flag} GUI回调执行出错: {e}")
+                                        
+                                        threading.Thread(
+                                            target=call_gui_callback,
+                                            daemon=True,
+                                            name=f"gui_callback_{self.id}"
+                                        ).start()
                                     except Exception as e:
-                                        logger.warning(f"{self.flag} 调用GUI超时回调时出错: {e}")
+                                        logger.warning(f"{self.flag} 启动GUI回调线程时出错: {e}")
                             
                             await asyncio.to_thread(
                                 self.run_record,
@@ -936,15 +1160,52 @@ class Kwai(LiveRecorder):
                             logger.debug(f"{self.flag} run_record调用完成")
                         except Exception as e:
                             logger.error(f"{self.flag} run_record执行失败: {e}", exc_info=True)
+                        finally:
+                            # 清理stream引用
+                            if hasattr(self, 'stream'):
+                                try:
+                                    if self.stream:
+                                        self.stream.close()
+                                except:
+                                    pass
+                                finally:
+                                    self.stream = None
                     except asyncio.TimeoutError:
                         logger.error(f"{self.flag} 创建或运行HTTPStream超时")
+                        # 清理stream引用
+                        if hasattr(self, 'stream'):
+                            try:
+                                if self.stream:
+                                    self.stream.close()
+                            except:
+                                pass
+                            finally:
+                                self.stream = None
                     except Exception as e:
                         logger.error(f"{self.flag} 创建或运行HTTPStream失败: {e}", exc_info=True)
+                        # 清理stream引用
+                        if hasattr(self, 'stream'):
+                            try:
+                                if self.stream:
+                                    self.stream.close()
+                            except:
+                                pass
+                            finally:
+                                self.stream = None
                 else:
                     self.mState = "2"  # 设置为未开播状态
                     logger.info(f"{self.flag} 未获取到直播URL，可能未开播")
             except Exception as e:
                 logger.error(f"{self.flag} 运行录制任务失败: {e}", exc_info=True)
+                # 清理stream引用
+                if hasattr(self, 'stream'):
+                    try:
+                        if self.stream:
+                            self.stream.close()
+                    except:
+                        pass
+                    finally:
+                        self.stream = None
                 # 添加短暂休眠，避免立即重试导致CPU占用过高
                 await asyncio.sleep(5)
 

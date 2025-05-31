@@ -118,27 +118,33 @@ class LiveRecorderApp(toga.App):
                         print(f"等待线程结束: {thread.name}")
                         thread.join(timeout=5)
                         
-                        # 如果线程仍然活着，使用更激进的方式终止
+                        # 如果线程仍然活着，给它更多时间自然结束
                         if thread.is_alive():
-                            print(f"强制终止线程：{thread.name}")
-                            try:
-                                import ctypes
-                                ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                                    ctypes.c_long(thread.ident),
-                                    ctypes.py_object(SystemExit)
-                                )
-                                # 再次等待确保线程已终止
-                                thread.join(timeout=1.0)
-                                if thread.is_alive():
-                                    # 如果仍然活着，尝试最后的强制终止
-                                    print(f"线程仍然活着，尝试最后的强制终止: {thread.name}")
+                            print(f"线程仍在运行，等待额外时间: {thread.name}")
+                            thread.join(timeout=2.0)  # 给更多时间
+                            
+                            # 如果仍然活着，使用更温和的方式
+                            if thread.is_alive():
+                                print(f"尝试温和终止线程：{thread.name}")
+                                try:
+                                    import ctypes
+                                    import time
+                                    
+                                    # 添加小延迟以减少竞争条件
+                                    time.sleep(0.1)
+                                    
                                     ctypes.pythonapi.PyThreadState_SetAsyncExc(
                                         ctypes.c_long(thread.ident),
-                                        ctypes.py_object(SystemError)
+                                        ctypes.py_object(SystemExit)
                                     )
-                                    thread.join(timeout=1.0)
-                            except Exception as force_error:
-                                print(f"强制终止线程失败: {force_error}")
+                                    # 等待线程响应
+                                    thread.join(timeout=2.0)
+                                    
+                                    if thread.is_alive():
+                                        print(f"线程未响应，跳过强制终止以避免系统错误: {thread.name}")
+                                        # 不再使用更激进的终止方式，以避免Windows fatal exception
+                                except Exception as force_error:
+                                    print(f"温和终止线程失败: {force_error}")
                         else:
                             print(f"成功终止线程：{thread.name}")
                 
@@ -153,6 +159,11 @@ class LiveRecorderApp(toga.App):
             print(f"退出时清理资源失败: {e}")
 
         print("资源清理完成，应用退出")
+        
+        # 添加小延迟以确保所有清理操作完成
+        import time
+        time.sleep(0.2)
+        
         # 直接返回True允许正常退出
         return True
 
@@ -309,8 +320,8 @@ class LiveRecorderApp(toga.App):
 
         # 创建并初始化表格
         self.users_table = toga.Table(
-            headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态', '操作'],
-            accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status', 'action'],
+            headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态'],
+            accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status'],
             data=[],
             style=Pack(flex=1,width=1150,height=300),
             on_select=self.on_user_selected,
@@ -410,8 +421,7 @@ class LiveRecorderApp(toga.App):
                     'interval': str(user.get('interval', 10)),
                     'duration': str(user.get('duration', '')) if user.get('duration') else '',
                     'duration_unit': str(user.get('duration_unit', 'seconds')),
-                    'status': '录制中' if is_recording else '未录制',
-                    'action': '停止录制' if is_recording else '开始录制'
+                    'status': '录制中' if is_recording else '未录制'
                 }
                 table_data.append(row_data)
                 print(f"Added row: {row_data}")  # 调试信息
@@ -781,54 +791,8 @@ class LiveRecorderApp(toga.App):
             def create_recorder_and_start():
                 """在独立线程中创建录制器并启动录制循环"""
                 try:
-                    # 创建GUI超时回调函数
-                    def gui_timeout_callback(recorder_user_id):
-                        """处理录制超时时的GUI状态更新"""
-                        print(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
-                        try:
-                            # 对于单个用户录制，需要停止对应的用户录制器
-                            if recorder_user_id in self.user_recorders and self.user_recorders[recorder_user_id]:
-                                print(f"停止用户 {recorder_user_id} 的录制器")
-                                # 在后台线程中停止录制器，避免阻塞GUI
-                                def stop_recorder_thread():
-                                    try:
-                                        # 确保停止的是用户录制器而不是全局录制器
-                                        if recorder_user_id in self.user_recorders and self.user_recorders[recorder_user_id]:
-                                            self.user_recorders[recorder_user_id].stop()
-                                            print(f"用户 {recorder_user_id} 的录制器已停止")
-                                    except Exception as e:
-                                        print(f"停止用户录制器时出错: {e}")
-                                
-                                # 启动后台线程停止录制器
-                                threading.Thread(
-                                    target=stop_recorder_thread,
-                                    daemon=True,
-                                    name=f"stop_recorder_{recorder_user_id}"
-                                ).start()
-                                
-                                # 立即清理录制器引用，不等待线程完成
-                                del self.user_recorders[recorder_user_id]
-                                print(f"已清理用户 {recorder_user_id} 的录制器引用")
-                        except Exception as e:
-                            print(f"停止用户录制器时出错: {e}")
-                        
-                        # 更新用户录制状态
-                        if recorder_user_id in self.user_recording_status:
-                            self.user_recording_status[recorder_user_id] = False
-                        
-                        # 刷新界面（直接在当前线程中执行，避免使用asyncio）
-                        try:
-                            # 直接调用非异步方法刷新表格
-                            self.refresh_users_table()
-                            
-                            # 如果当前选中的用户录制状态发生变化，更新按钮状态
-                            if self.current_user and self.current_user['id'] == recorder_user_id:
-                                self.start_user_record_button.enabled = True
-                                self.stop_user_record_button.enabled = False
-                            
-                            print("定时录制结束后UI状态已更新")
-                        except Exception as e:
-                            print(f"刷新UI时出错: {e}")
+                    # 使用统一的GUI超时回调函数
+                    gui_timeout_callback = self.create_gui_timeout_callback()
                     
                     # 不再需要导入LiveRecorder，因为已在主线程中导入
                     # from .live_recorder import LiveRecorder
@@ -888,70 +852,8 @@ class LiveRecorderApp(toga.App):
             def create_recorder_and_start():
                 """在独立线程中创建录制器并启动录制循环"""
                 try:
-                    # 创建GUI超时回调函数
-                    def gui_timeout_callback(recorder_user_id):
-                        """处理录制超时时的GUI状态更新"""
-                        print(f"全局录制中用户 {recorder_user_id} 定时录制结束，更新GUI状态")
-                        try:
-                            # 更新用户录制状态
-                            if recorder_user_id in self.user_recording_status:
-                                self.user_recording_status[recorder_user_id] = False
-                                print(f"已更新用户 {recorder_user_id} 的录制状态为 False")
-                            
-                            # 检查是否所有用户都已经录制完成
-                            all_users_done = True
-                            for status in self.user_recording_status.values():
-                                if status:
-                                    all_users_done = False
-                                    break
-                            
-                            # 只有当所有用户都录制完成时，才停止全局录制器
-                            if all_users_done and hasattr(self, 'recorder') and self.recorder:
-                                print(f"所有用户录制已完成，停止全局录制器")
-                                # 在后台线程中停止录制器，避免阻塞GUI
-                                def stop_recorder_thread():
-                                    try:
-                                        self.recorder.stop()
-                                        print(f"全局录制器已停止")
-                                        # 清理全局录制器引用
-                                        self.recorder = None
-                                        # 更新录制状态
-                                        self.recording = False
-                                    except Exception as e:
-                                        print(f"停止全局录制器时出错: {e}")
-                                
-                                # 启动后台线程停止录制器
-                                threading.Thread(
-                                    target=stop_recorder_thread,
-                                    daemon=True,
-                                    name="stop_global_recorder"
-                                ).start()
-                                
-                                # 更新UI状态（在主线程中执行）
-                                try:
-                                    # 更新按钮状态
-                                    self.record_button.text = "开始全部录制"
-                                    self.record_button.enabled = True
-                                    if hasattr(self.record_button.style, 'color'):
-                                        del self.record_button.style.color
-                                except Exception as e:
-                                    print(f"更新按钮状态时出错: {e}")
-                        except Exception as e:
-                            print(f"处理录制超时回调时出错: {e}")
-                        
-                        # 刷新界面（直接在当前线程中执行，避免使用asyncio）
-                        try:
-                            # 直接调用非异步方法刷新表格
-                            self.refresh_users_table()
-                            
-                            # 如果当前选中的用户录制状态发生变化，更新按钮状态
-                            if self.current_user and self.current_user['id'] == recorder_user_id:
-                                self.start_user_record_button.enabled = True
-                                self.stop_user_record_button.enabled = False
-                            
-                            print("定时录制结束后UI状态已更新")
-                        except Exception as e:
-                            print(f"刷新UI时出错: {e}")
+                    # 使用统一的GUI超时回调函数
+                    gui_timeout_callback = self.create_gui_timeout_callback()
                     
                     # 不再需要导入LiveRecorder，因为已在主线程中导入
                     # from .live_recorder import LiveRecorder
@@ -1020,7 +922,7 @@ class LiveRecorderApp(toga.App):
 
             await self.show_info_message('错误', f'启动全局录制失败: {str(e)}')
 
-    async def stop_user_recording(self, user_id):
+    async def stop_user_recording(self, user_id, is_manual_stop=True):
         """停止录制指定用户"""
         try:
             recorder = self.user_recorders.get(user_id)
@@ -1028,11 +930,18 @@ class LiveRecorderApp(toga.App):
                 # 在后台线程中停止录制器，避免阻塞GUI
                 def stop_recorder_thread():
                     try:
-                        print(f"在后台线程中停止用户 {user_id} 的录制器")
-                        recorder.stop()
-                        print(f"用户 {user_id} 的录制器已停止")
+                        print(f"在后台线程中停止用户 {user_id} 的录制任务")
+                        # 首先尝试正常停止
+                        recorder.stop_user(user_id, force=False)
+                        print(f"用户 {user_id} 的录制任务已停止")
                     except Exception as e:
-                        print(f"停止录制器线程中出错: {e}")
+                        print(f"正常停止失败，尝试强制停止: {e}")
+                        try:
+                            # 如果正常停止失败，尝试强制停止
+                            recorder.stop_user(user_id, force=True)
+                            print(f"用户 {user_id} 的录制任务已强制停止")
+                        except Exception as force_e:
+                            print(f"强制停止也失败: {force_e}")
                 
                 # 创建并启动停止线程
                 stop_thread = threading.Thread(
@@ -1044,6 +953,30 @@ class LiveRecorderApp(toga.App):
                 
                 # 立即从字典中删除录制器引用，避免重复停止
                 del self.user_recorders[user_id]
+            elif hasattr(self, 'recorder') and self.recorder and is_manual_stop:
+                # 如果是全局录制模式下的手动停止，只停止特定用户任务
+                def stop_global_user_thread():
+                    try:
+                        print(f"在全局录制模式下停止用户 {user_id} 的录制任务")
+                        # 首先尝试正常停止
+                        self.recorder.stop_user(user_id, force=False)
+                        print(f"全局录制模式下用户 {user_id} 的录制任务已停止")
+                    except Exception as e:
+                        print(f"正常停止失败，尝试强制停止: {e}")
+                        try:
+                            # 如果正常停止失败，尝试强制停止
+                            self.recorder.stop_user(user_id, force=True)
+                            print(f"全局录制模式下用户 {user_id} 的录制任务已强制停止")
+                        except Exception as force_e:
+                            print(f"强制停止也失败: {force_e}")
+                
+                # 创建并启动停止线程
+                stop_thread = threading.Thread(
+                    target=stop_global_user_thread,
+                    daemon=True,
+                    name=f"stop_global_user_{user_id}"
+                )
+                stop_thread.start()
 
             # 立即更新录制状态，不等待线程完成
             self.user_recording_status[user_id] = False
@@ -1259,6 +1192,64 @@ class LiveRecorderApp(toga.App):
         except Exception as e:
             print(f"刷新UI状态时出错: {e}")
 
+    def create_gui_timeout_callback(self):
+        """创建统一的GUI超时回调函数"""
+        def gui_timeout_callback(recorder_user_id):
+            """处理录制超时时的GUI状态更新"""
+            print(f"用户 {recorder_user_id} 定时录制结束，更新GUI状态")
+            
+            try:
+                # 更新用户录制状态
+                if recorder_user_id in self.user_recording_status:
+                    self.user_recording_status[recorder_user_id] = False
+                    print(f"已更新用户 {recorder_user_id} 的录制状态为 False")
+                
+                # 定时录制结束时，只需要清理状态，不需要主动停止任务
+                # 录制任务会自然结束，避免在回调中调用可能导致死锁的stop_user方法
+                print(f"定时录制结束：用户 {recorder_user_id} 的录制任务已自然结束")
+                
+                # 清理单独录制模式的录制器引用
+                if recorder_user_id in self.user_recorders:
+                    try:
+                        del self.user_recorders[recorder_user_id]
+                        print(f"已清理用户 {recorder_user_id} 的录制器引用")
+                    except Exception as e:
+                        print(f"清理录制器引用时出错: {e}")
+                
+                # 使用异步方式刷新界面，避免阻塞主线程
+                def safe_refresh_ui():
+                    try:
+                        # 刷新界面（只调用一次，避免重复刷新）
+                        self.refresh_users_table()
+                        
+                        # 如果当前选中的用户录制状态发生变化，更新按钮状态
+                        if self.current_user and self.current_user['id'] == recorder_user_id:
+                            self.start_user_record_button.enabled = True
+                            self.stop_user_record_button.enabled = False
+                        
+                        print("定时录制结束后UI状态已更新")
+                    except Exception as e:
+                        print(f"刷新UI时出错: {e}")
+                
+                # 使用主线程调度器安全地更新UI
+                import threading
+                if threading.current_thread() is threading.main_thread():
+                    # 如果已经在主线程，直接执行
+                    safe_refresh_ui()
+                else:
+                    # 如果在其他线程，延迟到主线程执行
+                    import time
+                    def delayed_refresh():
+                        time.sleep(0.1)  # 短暂延迟确保任务完全结束
+                        safe_refresh_ui()
+                    
+                    threading.Timer(0.1, delayed_refresh).start()
+                
+            except Exception as e:
+                print(f"GUI回调处理时出错: {e}")
+        
+        return gui_timeout_callback
+    
     def validate_recording_conditions(self):
         """验证录制条件"""
         try:
