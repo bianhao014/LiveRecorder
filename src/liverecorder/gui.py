@@ -357,9 +357,11 @@ class LiveRecorderApp(toga.App):
         try:
             proxy = widget.value.strip()
             if proxy and not validate_proxy(proxy):
-                self.main_window.info_dialog(
-                    'Error',
-                    'Invalid proxy format. Use http://host:port or socks5://host:port'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        'Error',
+                        'Invalid proxy format. Use http://host:port or socks5://host:port'
+                    )
                 )
                 return
 
@@ -411,8 +413,8 @@ class LiveRecorderApp(toga.App):
         """更新界面显示"""
         try:
             # 更新全局配置
-            self.proxy_input.value = self.config_manager.get_global_config('proxy', '')
-            self.output_input.value = self.config_manager.get_global_config('output', 'output')
+            self.proxy_input.value = self.config_manager.get_global_config('proxy', 'http://127.0.0.1:10808')
+            self.output_input.value = self.config_manager.get_global_config('output', 'D:\\')
             
             # 更新日志级别选择
             current_log_level = self.config_manager.get_global_config('log_level', 'INFO')
@@ -488,25 +490,31 @@ class LiveRecorderApp(toga.App):
         try:
             name = self.name_input.value.strip()
             if not name:
-                self.main_window.info_dialog(
-                    'Error',
-                    'Name is required'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        'Error',
+                        'Name is required'
+                    )
                 )
                 return False
 
             interval = self.interval_input.value.strip()
             if not validate_interval(interval):
-                self.main_window.info_dialog(
-                    'Error',
-                    'Interval must be a positive number'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        'Error',
+                        'Interval must be a positive number'
+                    )
                 )
                 return False
 
             duration = self.duration_input.value.strip()
             if duration and not validate_interval(duration):
-                self.main_window.info_dialog(
-                    'Error',
-                    'Duration must be a positive number'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        'Error',
+                        'Duration must be a positive number'
+                    )
                 )
                 return False
 
@@ -561,9 +569,11 @@ class LiveRecorderApp(toga.App):
                 if (user['name'].lower() == new_user['name'].lower() and
                         user['platform'].lower() == new_user['platform'].lower()):
                     self.logger.debug(f"用户已存在: {new_user['name']}@{new_user['platform']}")
-                    self.main_window.info_dialog(
-                        '错误',
-                        f'用户 {new_user["name"]} 已在平台 {new_user["platform"]} 存在'
+                    self.main_window.dialog(
+                        toga.InfoDialog(
+                            '错误',
+                            f'用户 {new_user["name"]} 已在平台 {new_user["platform"]} 存在'
+                        )
                     )
                     return
 
@@ -576,22 +586,28 @@ class LiveRecorderApp(toga.App):
             self.clear_user_form()
 
             # 6. 提供成功反馈
-            self.main_window.info_dialog(
-                '成功',
-                f'用户 {new_user["name"]} 添加成功'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '成功',
+                    f'用户 {new_user["name"]} 添加成功'
+                )
             )
 
         except ValueError as ve:
             self.logger.error(f"数值转换错误: {str(ve)}")
-            self.main_window.info_dialog(
-                '输入错误',
-                '请输入有效的数字值'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '输入错误',
+                    '请输入有效的数字值'
+                )
             )
         except Exception as e:
             self.logger.error(f"添加用户失败: {str(e)}")
-            self.main_window.info_dialog(
-                '错误',
-                f'添加用户失败: {str(e)}'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '错误',
+                    f'添加用户失败: {str(e)}'
+                )
             )
 
     def update_user(self, widget):
@@ -602,9 +618,11 @@ class LiveRecorderApp(toga.App):
             # 1. 检查是否有选中的用户
             if not self.current_user:
                 self.logger.warning("没有选中的用户")
-                self.main_window.info_dialog(
-                    '错误',
-                    '请先选择一个要修改的用户'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        '错误',
+                        '请先选择一个要修改的用户'
+                    )
                 )
                 return
 
@@ -637,9 +655,11 @@ class LiveRecorderApp(toga.App):
                     if (user['name'].lower() == updated_user['name'].lower() and
                             user['platform'].lower() == updated_user['platform'].lower()):
                         self.logger.debug(f"用户已存在: {updated_user['name']}@{updated_user['platform']}")
-                        self.main_window.info_dialog(
-                            '错误',
-                            f'用户 {updated_user["name"]} 已在平台 {updated_user["platform"]} 存在'
+                        self.main_window.dialog(
+                            toga.InfoDialog(
+                                '错误',
+                                f'用户 {updated_user["name"]} 已在平台 {updated_user["platform"]} 存在'
+                            )
                         )
                         return
 
@@ -653,22 +673,28 @@ class LiveRecorderApp(toga.App):
             self.current_user = updated_user
 
             # 7. 提供成功反馈
-            self.main_window.info_dialog(
-                '成功',
-                f'用户 {old_name} 更新成功'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '成功',
+                    f'用户 {old_name} 更新成功'
+                )
             )
 
         except ValueError as ve:
             self.logger.error(f"数值转换错误: {str(ve)}")
-            self.main_window.info_dialog(
-                '输入错误',
-                '请输入有效的数字值'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '输入错误',
+                    '请输入有效的数字值'
+                )
             )
         except Exception as e:
             self.logger.error(f"更新用户失败: {str(e)}")
-            self.main_window.info_dialog(
-                '错误',
-                f'更新用户失败: {str(e)}'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '错误',
+                    f'更新用户失败: {str(e)}'
+                )
             )
 
     def delete_user(self, widget):
@@ -679,9 +705,11 @@ class LiveRecorderApp(toga.App):
             # 1. 检查是否有选中的用户
             if not self.current_user:
                 self.logger.warning("没有选中的用户")
-                self.main_window.info_dialog(
-                    '错误',
-                    '请先选择一个要删除的用户'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        '错误',
+                        '请先选择一个要删除的用户'
+                    )
                 )
                 return
 
@@ -696,21 +724,28 @@ class LiveRecorderApp(toga.App):
             self.clear_user_form()
 
             # 4. 提供成功反馈
-            self.main_window.info_dialog(
-                '成功',
-                f'用户 {user_name} (ID: {user_id}) 删除成功'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '成功',
+                    f'用户 {user_name} (ID: {user_id}) 删除成功'
+                )
             )
 
         except Exception as e:
             self.logger.error(f"删除用户失败: {str(e)}")
-            self.main_window.info_dialog(
-                '错误',
-                f'删除用户失败: {str(e)}'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '错误',
+                    f'删除用户失败: {str(e)}'
+                )
             )
 
     def on_user_selected(self, table):
         """处理用户选择事件"""
         print(f"User selected: {table.selection}")
+
+        # 刷新用户表格以确保状态最新
+        self.refresh_users_table()
 
         row = table.selection
         self.current_user = None
@@ -747,6 +782,28 @@ class LiveRecorderApp(toga.App):
             is_recording = self.user_recording_status.get(user_id, False)
             self.start_user_record_button.enabled = not is_recording
             self.stop_user_record_button.enabled = is_recording
+            
+        # 更新全局录制按钮状态
+        self.update_record_button_state()
+
+    def update_record_button_state(self):
+        """更新全局录制按钮的状态"""
+        try:
+            # 检查是否有任何用户正在录制
+            any_recording = any(self.user_recording_status.values())
+            
+            if any_recording:
+                self.record_button.text = "停止全部录制"
+                self.record_button.style.color = "red"
+                self.record_button.enabled = True
+            else:
+                self.record_button.text = "开始全部录制"
+                self.record_button.enabled = True
+                if hasattr(self.record_button.style, 'color'):
+                    del self.record_button.style.color
+                    
+        except Exception as e:
+            self.logger.error(f"更新录制按钮状态时出错: {e}")
 
     async def toggle_user_recording(self, user_id):
         """切换单个用户的录制状态"""
@@ -859,6 +916,9 @@ class LiveRecorderApp(toga.App):
             if self.current_user and self.current_user['id'] == user_id:
                 self.start_user_record_button.enabled = False
                 self.stop_user_record_button.enabled = True
+            
+            # 更新全局录制按钮状态
+            self.update_record_button_state()
 
             self.logger.info(f"用户 {user_data['name']} 录制任务已启动")
             await self.show_info_message('成功', f"用户 {user_data['name']} 录制任务已启动")
@@ -1002,6 +1062,15 @@ class LiveRecorderApp(toga.App):
 
             # 立即更新录制状态，不等待线程完成
             self.user_recording_status[user_id] = False
+            
+            # 刷新界面和更新按钮状态
+            self.refresh_users_table()
+            if self.current_user and self.current_user['id'] == user_id:
+                self.start_user_record_button.enabled = True
+                self.stop_user_record_button.enabled = False
+            
+            # 更新全局录制按钮状态
+            self.update_record_button_state()
 
             user_data = self.config_manager.get_user_by_id(user_id)
             user_name = user_data['name'] if user_data else f'用户{user_id}'
@@ -1042,9 +1111,8 @@ class LiveRecorderApp(toga.App):
                     return
 
                 self.recording = True
-                self.record_button.text = "停止全部录制"
-                self.record_button.style.color = "red"
-                self.record_button.enabled = False  # 暂时禁用按钮防止重复点击
+                # 暂时禁用按钮防止重复点击
+                self.record_button.enabled = False
 
                 # 导出配置
                 exported_config = self.config_manager.export_config()
@@ -1098,15 +1166,13 @@ class LiveRecorderApp(toga.App):
                 print("已刷新用户表格显示录制状态")
 
                 print("录制任务已启动")
-                self.record_button.enabled = True  # 重新启用按钮
+                # 更新按钮状态
+                self.update_record_button_state()
 
             else:
                 # 停止录制
                 print("开始停止录制过程")
                 self.recording = False
-                self.record_button.text = "开始全部录制"
-                self.record_button.enabled = True
-                del self.record_button.style.color
 
                 # 停止全局录制器
                 if self.recorder:
@@ -1125,6 +1191,9 @@ class LiveRecorderApp(toga.App):
                 for user_id in list(self.user_recording_status.keys()):
                     self.user_recording_status[user_id] = False
                 self.refresh_users_table()
+                
+                # 更新按钮状态
+                self.update_record_button_state()
 
                 # 清理录制线程（不阻塞主线程）
                 def cleanup_threads():
@@ -1152,25 +1221,25 @@ class LiveRecorderApp(toga.App):
 
         except Exception as e:
             self.logger.error(f"切换录制状态失败: {str(e)}")
-            self.main_window.info_dialog(
-                '错误',
-                f'切换录制状态失败: {str(e)}'
+            self.main_window.dialog(
+                toga.InfoDialog(
+                    '错误',
+                    f'切换录制状态失败: {str(e)}'
+                )
             )
             # 确保状态重置
             self.recording = False
-            self.record_button.text = "开始全部录制"
-            self.record_button.enabled = True
-            del self.record_button.style.color
+            self.update_record_button_state()
 
     def _handle_recording_error(self, *args):
         """处理录制错误的回调函数"""
         self.recording = False
-        self.record_button.text = "开始全部录制"
-        self.record_button.enabled = True
-        del self.record_button.style.color
-        self.main_window.info_dialog(
-            '错误',
-            '录制过程发生错误，已停止录制'
+        self.update_record_button_state()
+        self.main_window.dialog(
+            toga.InfoDialog(
+                '错误',
+                '录制过程发生错误，已停止录制'
+            )
         )
 
     async def _async_handle_recording_error(self):
@@ -1183,13 +1252,8 @@ class LiveRecorderApp(toga.App):
         
     async def _async_update_ui_after_recording_stop(self):
         """异步更新UI状态（在录制停止后）"""
-        # 更新按钮状态
-        self.record_button.text = "开始全部录制"
-        self.record_button.enabled = True
-        del self.record_button.style.color
-        
-        # 刷新用户表格
-        self.refresh_users_table()
+        # 简单记录状态，不直接操作UI组件
+        self.logger.info("录制已停止，UI状态将在下次用户交互时更新")
         
         # 显示通知
         await self.show_info_message('成功', "录制已停止")
@@ -1197,22 +1261,16 @@ class LiveRecorderApp(toga.App):
     async def _async_refresh_ui_after_timeout(self):
         """定时录制结束后异步刷新UI状态"""
         try:
-            # 刷新用户表格
-            self.refresh_users_table()
-            
-            # 如果当前选中的用户录制状态发生变化，更新按钮状态
-            if self.current_user:
-                user_id = self.current_user['id']
-                is_recording = self.user_recording_status.get(user_id, False)
-                self.start_user_record_button.enabled = not is_recording
-                self.stop_user_record_button.enabled = is_recording
+            # 简单记录状态，不直接操作UI组件
+            self.logger.info("定时录制结束，UI状态将在下次用户交互时更新")
             
             # 显示通知
             await self.show_info_message('提示', '定时录制已结束')
             
-            self.logger.info("定时录制结束后UI状态已更新")
         except Exception as e:
-            self.logger.error(f"刷新UI状态时出错: {e}")
+            self.logger.error(f"处理定时录制结束时出错: {e}")
+            import traceback
+            self.logger.error(f"错误堆栈: {traceback.format_exc()}")
 
     def create_gui_timeout_callback(self):
         """创建统一的GUI超时回调函数"""
@@ -1238,34 +1296,22 @@ class LiveRecorderApp(toga.App):
                     except Exception as e:
                         print(f"清理录制器引用时出错: {e}")
                 
-                # 使用异步方式刷新界面，避免阻塞主线程
-                def safe_refresh_ui():
-                    try:
-                        # 刷新界面（只调用一次，避免重复刷新）
-                        self.refresh_users_table()
-                        
-                        # 如果当前选中的用户录制状态发生变化，更新按钮状态
-                        if self.current_user and self.current_user['id'] == recorder_user_id:
-                            self.start_user_record_button.enabled = True
-                            self.stop_user_record_button.enabled = False
-                        
-                        self.logger.info("定时录制结束后UI状态已更新")
-                    except Exception as e:
-                        self.logger.error(f"刷新UI时出错: {e}")
+                # 强制垃圾回收，确保资源及时释放
+                try:
+                    import gc
+                    gc.collect()
+                except Exception as gc_error:
+                    self.logger.warning(f"垃圾回收时出错: {gc_error}")
                 
-                # 使用主线程调度器安全地更新UI
-                import threading
-                if threading.current_thread() is threading.main_thread():
-                    # 如果已经在主线程，直接执行
-                    safe_refresh_ui()
-                else:
-                    # 如果在其他线程，延迟到主线程执行
-                    import time
-                    def delayed_refresh():
-                        time.sleep(0.1)  # 短暂延迟确保任务完全结束
-                        safe_refresh_ui()
-                    
-                    threading.Timer(0.1, delayed_refresh).start()
+                # 使用异步方式刷新界面，避免阻塞主线程
+                # 不在异步线程中操作UI组件，只记录状态变化
+                self.logger.info(f"用户 {recorder_user_id} 定时录制已结束，状态已更新")
+                
+                # 如果当前选中的用户录制状态发生变化，标记需要更新按钮状态
+                if self.current_user and self.current_user['id'] == recorder_user_id:
+                    self.logger.debug(f"当前用户 {recorder_user_id} 录制结束，UI将在下次刷新时更新")
+                
+                self.logger.info(f"用户 {recorder_user_id} 的定时录制处理完成")
                 
             except Exception as e:
                 self.logger.error(f"GUI回调处理时出错: {e}")
@@ -1278,18 +1324,22 @@ class LiveRecorderApp(toga.App):
             # 检查输出目录
             output_dir = self.config_manager.get_global_config('output', '')
             if not output_dir or not os.path.isdir(output_dir):
-                self.main_window.info_dialog(
-                    '错误',
-                    '请先设置有效的输出目录'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        '错误',
+                        '请先设置有效的输出目录'
+                    )
                 )
                 return False
 
             # 检查至少有一个用户
             users = self.config_manager.get_all_users()
             if not users:
-                self.main_window.info_dialog(
-                    '错误',
-                    '请先添加至少一个录制用户'
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        '错误',
+                        '请先添加至少一个录制用户'
+                    )
                 )
                 return False
 

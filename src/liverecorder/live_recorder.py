@@ -720,20 +720,39 @@ class LiveRecorder:
                 duration = end_time - start_time
                 self.logger.info(f'{self.flag}录制完成，持续时间：{duration:.2f}秒')
 
-                # 安全关闭资源
+                # 安全关闭资源 - 立即关闭避免ResourceWarning
                 try:
-                    if output_opened and hasattr(output, 'close') and not getattr(output, 'closed', True):
-                        output.close()
-                        self.logger.debug(f'{self.flag}输出文件已关闭')
+                    if output_opened and hasattr(output, 'close'):
+                        # 检查文件是否仍然打开
+                        if hasattr(output, 'opened') and output.opened:
+                            output.close()
+                            self.logger.debug(f'{self.flag}输出文件已关闭')
+                        elif not getattr(output, 'closed', True):
+                            output.close()
+                            self.logger.debug(f'{self.flag}输出文件已关闭')
                 except Exception as close_err:
                     self.logger.warning(f'{self.flag}关闭输出文件时出错: {close_err}')
+                    # 尝试强制关闭
+                    try:
+                        if hasattr(output, '_close'):
+                            output._close()
+                    except:
+                        pass
                 
                 try:
-                    if hasattr(stream_fd, 'close') and not getattr(stream_fd, 'closed', True):
-                        stream_fd.close()
-                        self.logger.debug(f'{self.flag}流已关闭')
+                    if hasattr(stream_fd, 'close'):
+                        # 检查流是否仍然打开
+                        if not getattr(stream_fd, 'closed', True):
+                            stream_fd.close()
+                            self.logger.debug(f'{self.flag}流已关闭')
                 except Exception as close_err:
                     self.logger.warning(f'{self.flag}关闭流时出错: {close_err}')
+                    # 尝试强制关闭
+                    try:
+                        if hasattr(stream_fd, '_close'):
+                            stream_fd._close()
+                    except:
+                        pass
 
                 # 清理资源
                 if url in recording:
