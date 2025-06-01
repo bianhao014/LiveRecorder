@@ -18,8 +18,7 @@ dependencies = [
     "jsonpath-ng>=1.6.1",
     "jsengine>=1.0.7.post1",
     "quickjs>=1.19.4",
-    "httpx-socks[asyncio]>=0.9.1",
-    "PyQt6>=6.4.2"
+    "httpx-socks[asyncio]>=0.9.1"
 ]
 
 [tool.briefcase]

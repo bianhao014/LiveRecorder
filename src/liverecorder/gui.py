@@ -168,9 +168,6 @@ class LiveRecorderApp(toga.App):
 
     def startup(self):
 
-
-
-
         # 创建主窗口
         self.main_window = toga.MainWindow(title=self.formal_name)
 
@@ -424,6 +421,193 @@ class LiveRecorderApp(toga.App):
             self.refresh_users_table()
         except Exception as e:
             self.logger.error(f"Error updating display: {e}")
+
+    def refresh_ui(self):
+        """刷新全局页面UI"""
+        try:
+            # 移除旧的内容
+            if hasattr(self, 'main_window') and self.main_window.content:
+                old_content = self.main_window.content
+                self.main_window.content = None
+            
+            # 重新创建设置页内容
+            settings_content = toga.Box(style=Pack(direction=COLUMN, margin=10))
+            settings_scroll = toga.ScrollContainer(style=Pack(flex=1))
+            settings_scroll.content = settings_content
+            
+            # 主窗口内容直接使用设置页面
+            main_content = settings_scroll
+            
+            # 全局配置
+            global_config_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+            global_config_box.add(toga.Label('全局设置', style=Pack(margin=(0, 0, 5, 0))))
+            
+            # Proxy输入
+            proxy_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.proxy_input = toga.TextInput(
+                style=Pack(flex=1),
+                on_confirm=self.on_proxy_changed,
+                on_lose_focus=self.on_proxy_changed
+            )
+            proxy_box.add(toga.Label('代理设置:', style=Pack(width=100)))
+            proxy_box.add(self.proxy_input)
+            global_config_box.add(proxy_box)
+            
+            # Output目录选择
+            output_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.output_input = toga.TextInput(
+                style=Pack(flex=1),
+                on_change=self.on_output_changed
+            )
+            self.output_button = toga.Button(
+                '浏览',
+                on_press=self.select_output_directory,
+                style=Pack(width=80)
+            )
+            output_box.add(toga.Label('输出目录:', style=Pack(width=100)))
+            output_box.add(self.output_input)
+            output_box.add(self.output_button)
+            global_config_box.add(output_box)
+            
+            # 日志级别选择
+            log_level_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.log_level_select = toga.Selection(
+                items=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                style=Pack(flex=1),
+                on_change=self.on_log_level_changed
+            )
+            log_level_box.add(toga.Label('日志级别:', style=Pack(width=100)))
+            log_level_box.add(self.log_level_select)
+            global_config_box.add(log_level_box)
+            
+            settings_content.add(global_config_box)
+            
+            # 用户配置
+            user_config_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+            user_config_box.add(toga.Label('录制用户设置', style=Pack(margin=(10, 0, 5, 0))))
+            
+            # Platform选择
+            platform_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.platform_select = toga.Selection(
+                items=['Kwai'],
+                style=Pack(flex=1)
+            )
+            platform_box.add(toga.Label('平台:', style=Pack(width=100)))
+            platform_box.add(self.platform_select)
+            user_config_box.add(platform_box)
+            
+            # Name输入
+            name_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.name_input = toga.TextInput(style=Pack(flex=1))
+            name_box.add(toga.Label('用户昵称:', style=Pack(width=100)))
+            name_box.add(self.name_input)
+            user_config_box.add(name_box)
+            
+            # Interval输入
+            interval_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.interval_input = toga.TextInput(style=Pack(flex=1))
+            interval_box.add(toga.Label('轮询时间间隔:', style=Pack(width=100)))
+            interval_box.add(self.interval_input)
+            user_config_box.add(interval_box)
+            
+            # Duration输入
+            duration_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.duration_input = toga.TextInput(style=Pack(flex=1))
+            duration_box.add(toga.Label('录制时长:', style=Pack(width=100)))
+            duration_box.add(self.duration_input)
+            user_config_box.add(duration_box)
+            
+            # Duration单位选择
+            unit_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.unit_select = toga.Selection(
+                items=['seconds', 'minutes', 'hours'],
+                style=Pack(flex=1)
+            )
+            unit_box.add(toga.Label('时长单位:', style=Pack(width=100)))
+            unit_box.add(self.unit_select)
+            user_config_box.add(unit_box)
+            
+            # 用户操作按钮
+            user_buttons_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.add_user_button = toga.Button(
+                '新增用户',
+                on_press=self.add_user,
+                style=Pack(flex=1, margin=2)
+            )
+            self.update_user_button = toga.Button(
+                '修改用户',
+                on_press=self.update_user,
+                style=Pack(flex=1, margin=2)
+            )
+            self.delete_user_button = toga.Button(
+                '删除用户',
+                on_press=self.delete_user,
+                style=Pack(flex=1, margin=2)
+            )
+            user_buttons_box.add(self.add_user_button)
+            user_buttons_box.add(self.update_user_button)
+            user_buttons_box.add(self.delete_user_button)
+            user_config_box.add(user_buttons_box)
+            
+            # 单个用户录制控制按钮
+            user_record_buttons_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.start_user_record_button = toga.Button(
+                '开始录制选中用户',
+                on_press=self.start_selected_user_recording,
+                style=Pack(flex=1, margin=2)
+            )
+            self.stop_user_record_button = toga.Button(
+                '停止录制选中用户',
+                on_press=self.stop_selected_user_recording,
+                style=Pack(flex=1, margin=2)
+            )
+            user_record_buttons_box.add(self.start_user_record_button)
+            user_record_buttons_box.add(self.stop_user_record_button)
+            user_config_box.add(user_record_buttons_box)
+            
+            # 全部录制控制按钮
+            global_record_buttons_box = toga.Box(style=Pack(direction=ROW, margin=2))
+            self.record_button = toga.Button(
+                '开始全部录制',
+                on_press=self.toggle_recording,
+                style=Pack(flex=1, margin=2)
+            )
+            global_record_buttons_box.add(self.record_button)
+            user_config_box.add(global_record_buttons_box)
+            
+            settings_content.add(user_config_box)
+            
+            # 用户列表
+            users_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
+            users_box.add(toga.Label('用户列表', style=Pack(margin=(10, 0, 5, 0))))
+            
+            # 创建并初始化表格
+            self.users_table = toga.Table(
+                headings=['ID', '平台', '用户昵称', '轮询间隔', '录制时长', '时长单位', '状态'],
+                accessors=['id', 'platform', 'name', 'interval', 'duration', 'duration_unit', 'status'],
+                data=[],
+                style=Pack(flex=1,width=1150,height=300),
+                on_select=self.on_user_selected,
+                multiple_select=False,
+                missing_value=''
+            )
+            users_box.add(self.users_table)
+            
+            settings_content.add(users_box)
+            
+            # 将新内容添加到主窗口
+            self.main_window.content = main_content
+            
+            # 加载配置并更新显示
+            self.update_config_display()
+            
+            # 显示主窗口
+            self.main_window.show()
+            
+            self.logger.info("UI已刷新")
+            
+        except Exception as e:
+            self.logger.error(f"刷新UI失败: {e}")
 
     def refresh_users_table(self):
         """刷新用户列表"""
@@ -822,14 +1006,10 @@ class LiveRecorderApp(toga.App):
                 # 停止录制该用户
                 await self.stop_user_recording(user_id)
 
-            # 刷新表格显示
+            
+            # 刷新用户列表表格以更新录制状态显示
+           
             self.refresh_users_table()
-
-            # 如果当前选中的用户状态发生变化，更新按钮状态
-            if self.current_user and self.current_user['id'] == user_id:
-                is_recording = self.user_recording_status.get(user_id, False)
-                self.start_user_record_button.enabled = not is_recording
-                self.stop_user_record_button.enabled = is_recording
 
         except Exception as e:
             self.logger.error(f"切换用户录制状态失败: {str(e)}")
@@ -839,13 +1019,22 @@ class LiveRecorderApp(toga.App):
         """开始录制指定用户"""
         try:
             # 验证输出目录
-            output_dir = self.config_manager.get_global_config('output', '')
+            output_dir = self.config_manager.get_global_config('output', 'd:\\')
             # 如果GUI中没有设置输出目录，则不传递output到LiveRecorder，让其使用默认值
             if not output_dir:
                 self.logger.debug("GUI中未设置输出目录，将使用LiveRecorder的默认输出目录。")
             elif not os.path.isdir(output_dir):
                 await self.show_info_message('错误', '请先设置有效的输出目录')
                 return
+
+            # 立即更新用户录制状态，让用户看到状态变化
+            self.user_recording_status[user_id] = True
+            
+            # 立即刷新界面显示
+            self.refresh_users_table()
+            if self.current_user and self.current_user['id'] == user_id:
+                self.start_user_record_button.enabled = False
+                self.stop_user_record_button.enabled = True
 
             # 创建单用户配置
             config = {
@@ -855,13 +1044,20 @@ class LiveRecorderApp(toga.App):
             }
 
             # 使用asyncio.create_task在后台启动录制，避免阻塞GUI
-            await asyncio.create_task(self._start_user_recording_task(user_id, user_data, config))
+            asyncio.create_task(self._start_user_recording_task(user_id, user_data, config))
 
             self.logger.info(f"正在启动用户 {user_data['name']} 的录制...")
 
         except Exception as e:
             self.logger.error(f"启动用户录制失败: {str(e)}")
+            # 如果启动失败，恢复状态
+            self.user_recording_status[user_id] = False
+            self.refresh_users_table()
+            if self.current_user and self.current_user['id'] == user_id:
+                self.start_user_record_button.enabled = True
+                self.stop_user_record_button.enabled = False
             await self.show_info_message('错误', f'启动录制失败: {str(e)}')
+
 
     async def _start_user_recording_task(self, user_id, user_data, config):
         """在后台线程中启动用户录制的异步任务"""
@@ -907,25 +1103,14 @@ class LiveRecorderApp(toga.App):
 
             # 保存线程引用
             self.recorder_threads.append(record_thread)
-
-            # 更新用户录制状态
-            self.user_recording_status[user_id] = True
-
-            # 刷新界面
-            self.refresh_users_table()
-            if self.current_user and self.current_user['id'] == user_id:
-                self.start_user_record_button.enabled = False
-                self.stop_user_record_button.enabled = True
             
             # 更新全局录制按钮状态
             self.update_record_button_state()
 
             self.logger.info(f"用户 {user_data['name']} 录制任务已启动")
-            await self.show_info_message('成功', f"用户 {user_data['name']} 录制任务已启动")
 
         except Exception as e:
             self.logger.error(f"启动用户录制失败: {str(e)}")
-            await self.show_info_message('错误', f'启动录制失败: {str(e)}')
 
     async def _start_global_recording_task(self, config):
         """在后台线程中启动全局录制的异步任务"""
@@ -1076,11 +1261,11 @@ class LiveRecorderApp(toga.App):
             user_name = user_data['name'] if user_data else f'用户{user_id}'
 
             self.logger.info(f"用户 {user_name} 停止录制")
-            await self.show_info_message('成功', f"用户 {user_name} 停止录制")
 
         except Exception as e:
             self.logger.error(f"停止用户录制失败: {str(e)}")
             await self.show_info_message('错误', f'停止录制失败: {str(e)}')
+        
 
     async def start_selected_user_recording(self, widget):
         """开始录制选中的用户"""
@@ -1302,6 +1487,9 @@ class LiveRecorderApp(toga.App):
                     gc.collect()
                 except Exception as gc_error:
                     self.logger.warning(f"垃圾回收时出错: {gc_error}")
+                
+                # 刷新用户表格以显示最新的录制状态
+                self.refresh_users_table()
                 
                 # 使用异步方式刷新界面，避免阻塞主线程
                 # 不在异步线程中操作UI组件，只记录状态变化
